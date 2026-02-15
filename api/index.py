@@ -49,7 +49,7 @@ def scrape_drama_list():
                 unique_dramas.append(drama)
         
         return unique_dramas
-    except:
+    except Exception as e:
         return []
 
 def scrape_drama_detail(drama_url):
@@ -99,7 +99,7 @@ def scrape_drama_detail(drama_url):
             'episodes': episodes,
             'drama_url': drama_url
         }
-    except:
+    except Exception as e:
         return None
 
 def scrape_episode_stream(episode_url):
@@ -144,23 +144,23 @@ def scrape_episode_stream(episode_url):
                     video_sources.append({'type': 'mp4', 'url': mp4})
         
         return video_sources
-    except:
+    except Exception as e:
         return []
 
-@app.route('/', methods=['GET'])
+@app.route('/')
 def index():
     return jsonify({
         'service': 'GoodShort API',
         'version': '1.0',
         'endpoints': {
             'GET /api/dramas': 'Mendapatkan semua drama',
-            'POST /api/drama/detail': 'Detail drama (body: {"drama_url": "..."})',
-            'POST /api/search': 'Cari drama (body: {"keyword": "..."})',
-            'POST /api/episode/stream': 'Stream episode (body: {"episode_url": "..."})'
+            'POST /api/drama/detail': 'Detail drama',
+            'POST /api/search': 'Cari drama',
+            'POST /api/episode/stream': 'Stream episode'
         }
     })
 
-@app.route('/api/dramas', methods=['GET'])
+@app.route('/api/dramas')
 def get_all_dramas():
     try:
         dramas = scrape_drama_list()
@@ -216,8 +216,3 @@ def get_episode_stream():
         return jsonify({'status': 'success', 'total_sources': len(sources), 'sources': sources})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
-# Vercel handler
-def handler(request):
-    with app.request_context(request.environ):
-        return app.full_dispatch_request()
