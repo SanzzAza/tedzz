@@ -10,280 +10,32 @@ export default async function handler(req, res) {
         return;
     }
     
-    // GoodShort Internal API endpoints (reverse engineered)
-    const GOODSHORT_API = 'https://api.goodshort.com'; // atau bisa jadi api subdomain lain
-    
-    // Kemungkinan API base URLs
-    const API_BASES = [
-        'https://api.goodshort.com',
-        'https://www.goodshort.com/api',
-        'https://goodshort.com/api',
-        'https://api-sg.goodshort.com',
-        'https://api-id.goodshort.com'
-    ];
+    // API DramaBos yang LU KASIH LIAT
+    const DRAMABOS_API = 'https://goodshort.dramabos.my.id';
     
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
-        'Origin': 'https://www.goodshort.com',
-        'Referer': 'https://www.goodshort.com/',
-        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-site'
+        'Accept': 'application/json',
+        'Accept-Language': 'id-ID,id;q=0.9'
     };
     
-    // Try multiple API endpoints
-    async function callGoodShortAPI(endpoint, params = {}, method = 'GET') {
-        for (const baseUrl of API_BASES) {
-            try {
-                console.log(`Trying: ${baseUrl}${endpoint}`);
-                
-                const config = {
-                    method: method,
-                    url: `${baseUrl}${endpoint}`,
-                    headers: headers,
-                    params: params,
-                    timeout: 15000
-                };
-                
-                const response = await axios(config);
-                
-                if (response.data && (response.data.success || response.data.status === 0)) {
-                    console.log(`✓ Success with ${baseUrl}${endpoint}`);
-                    return response.data;
-                }
-                
-            } catch (error) {
-                console.log(`✗ Failed with ${baseUrl}${endpoint}:`, error.message);
-                continue;
-            }
-        }
-        
-        return null;
-    }
-    
-    // Get Book Detail
-    async function getBookDetail(bookId, lang = 'in') {
-        // Possible endpoint patterns based on DramaBos
-        const endpoints = [
-            '/book/quick/open',
-            '/book/open',
-            '/book/detail',
-            '/v1/book/quick/open',
-            '/v1/book/open',
-            '/api/book/quick/open',
-            `/book/${bookId}`,
-            `/v1/book/${bookId}`
-        ];
-        
-        const params = {
-            bookId: bookId,
-            lang: lang
-        };
-        
-        for (const endpoint of endpoints) {
-            const data = await callGoodShortAPI(endpoint, params);
-            if (data) {
-                return formatBookData(data);
-            }
-        }
-        
-        return null;
-    }
-    
-    // Format book data
-    function formatBookData(apiResponse) {
-        if (!apiResponse.data || !apiResponse.data.book) {
+    // Helper: Call DramaBos API
+    async function callAPI(endpoint, params = {}) {
+        try {
+            console.log(`Calling: ${DRAMABOS_API}${endpoint}`);
+            
+            const response = await axios.get(`${DRAMABOS_API}${endpoint}`, {
+                headers,
+                params,
+                timeout: 20000
+            });
+            
+            return response.data;
+            
+        } catch (error) {
+            console.error('API Error:', error.message);
             return null;
         }
-        
-        const book = apiResponse.data.book;
-        const chapters = apiResponse.data.list || [];
-        
-        return {
-            id: book.bookId,
-            title: book.bookName,
-            description: book.introduction,
-            cover: book.cover || book.bookDetailCover,
-            thumbnail: book.cover || book.bookDetailCover,
-            author: book.playwright || book.producer || book.pseudonym,
-            protagonist: book.protagonist,
-            language: book.languageDisplay,
-            status: book.writeStatus,
-            rating: book.ratings,
-            views: book.viewCount,
-            view_display: book.viewCountDisplay,
-            tags: book.labels || [],
-            chapter_count: book.chapterCount,
-            comment_count: book.commentCount,
-            follow_count: book.followCount,
-            book_type: book.bookType,
-            grade: book.grade,
-            total_chapters: chapters.length,
-            chapters: chapters.map(ch => ({
-                id: ch.id,
-                chapter_number: ch.index + 1,
-                title: ch.chapterName,
-                image: ch.image,
-                play_time: ch.playTime,
-                play_count: ch.playCount,
-                play_count_display: ch.playCountDisplay,
-                price: ch.price,
-                charged: ch.charged,
-                cdn: ch.cdn,
-                cdn_list: ch.cdnList || [],
-                multi_videos: ch.multiVideos || [],
-                next_chapter_id: ch.nextChapterId,
-                prev_chapter_id: ch.prevChapterId,
-                volume_id: ch.volumeId
-            }))
-        };
-    }
-    
-    // Get Chapter Detail
-    async function getChapterDetail(chapterId, lang = 'in') {
-        const endpoints = [
-            '/book/chapter/open',
-            '/chapter/open',
-            '/v1/book/chapter/open',
-            `/chapter/${chapterId}`
-        ];
-        
-        const params = {
-            chapterId: chapterId,
-            lang: lang
-        };
-        
-        for (const endpoint of endpoints) {
-            const data = await callGoodShortAPI(endpoint, params);
-            if (data) {
-                return formatChapterData(data);
-            }
-        }
-        
-        return null;
-    }
-    
-    // Format chapter data
-    function formatChapterData(apiResponse) {
-        if (!apiResponse.data) {
-            return null;
-        }
-        
-        const ch = apiResponse.data;
-        
-        // Extract all video sources
-        const sources = [];
-        
-        // Main CDN
-        if (ch.cdn) {
-            sources.push({
-                type: 'm3u8',
-                quality: 'default',
-                url: ch.cdn
-            });
-        }
-        
-        // Multi quality videos
-        if (ch.multiVideos && Array.isArray(ch.multiVideos)) {
-            ch.multiVideos.forEach(video => {
-                sources.push({
-                    type: 'm3u8',
-                    quality: video.type,
-                    url: video.filePath
-                });
-                
-                // CDN alternatives
-                if (video.cdnList) {
-                    video.cdnList.forEach(cdn => {
-                        sources.push({
-                            type: 'm3u8',
-                            quality: `${video.type}_cdn`,
-                            url: cdn.videoPath,
-                            cdn_domain: cdn.cdnDomain
-                        });
-                    });
-                }
-            });
-        }
-        
-        // CDN List
-        if (ch.cdnList && Array.isArray(ch.cdnList)) {
-            ch.cdnList.forEach(cdn => {
-                sources.push({
-                    type: 'm3u8',
-                    quality: 'cdn',
-                    url: cdn.videoPath,
-                    cdn_domain: cdn.cdnDomain
-                });
-            });
-        }
-        
-        return {
-            id: ch.id,
-            book_id: ch.bookId,
-            title: ch.chapterName,
-            image: ch.image,
-            play_time: ch.playTime,
-            play_count: ch.playCount,
-            index: ch.index,
-            charged: ch.charged,
-            price: ch.price,
-            next_chapter_id: ch.nextChapterId,
-            next_chapter_name: ch.nextChapterName,
-            prev_chapter_id: ch.prevChapterId,
-            prev_chapter_name: ch.prevChapterName,
-            total_sources: sources.length,
-            sources: sources
-        };
-    }
-    
-    // Get Home/List
-    async function getHome(lang = 'in') {
-        const endpoints = [
-            '/book/list',
-            '/book/recommend',
-            '/v1/book/list',
-            '/home/recommend'
-        ];
-        
-        const params = { lang: lang };
-        
-        for (const endpoint of endpoints) {
-            const data = await callGoodShortAPI(endpoint, params);
-            if (data) {
-                return data;
-            }
-        }
-        
-        return null;
-    }
-    
-    // Search
-    async function search(keyword, lang = 'in') {
-        const endpoints = [
-            '/book/search',
-            '/search',
-            '/v1/book/search'
-        ];
-        
-        const params = {
-            keyword: keyword,
-            lang: lang
-        };
-        
-        for (const endpoint of endpoints) {
-            const data = await callGoodShortAPI(endpoint, params);
-            if (data) {
-                return data;
-            }
-        }
-        
-        return null;
     }
     
     // Routes
@@ -295,22 +47,21 @@ export default async function handler(req, res) {
         // GET /
         if (parts.length === 0) {
             return res.json({
-                service: 'GoodShort API',
-                version: '9.0',
-                type: 'Reverse Engineered API',
+                service: 'GoodShort API (via DramaBos)',
+                version: '10.0',
                 status: 'online',
+                source: 'https://goodshort.dramabos.my.id',
                 endpoints: {
-                    'GET /nav': 'Navigation',
-                    'GET /home?lang=in': 'Home page dramas',
+                    'GET /nav': 'Navigation menu',
+                    'GET /home?lang=in': 'Get all dramas',
                     'GET /search?q=keyword&lang=in': 'Search dramas',
                     'GET /hot?lang=in': 'Hot dramas',
-                    'GET /book/{bookId}?lang=in': 'Book detail with chapters',
-                    'GET /chapters/{bookId}?lang=in': 'Chapters only',
-                    'GET /play/{chapterId}?lang=in': 'Chapter with video sources',
-                    'GET /m3u8/{chapterId}?lang=in': 'Best stream URL'
+                    'GET /book/{bookId}?lang=in': 'Book detail (contoh: /book/31001241758?lang=in)',
+                    'GET /chapters/{bookId}?lang=in': 'Get chapters list',
+                    'GET /play/{chapterId}?lang=in': 'Get chapter with video sources',
+                    'GET /m3u8/{chapterId}?lang=in': 'Get direct m3u8 stream URL'
                 },
-                note: 'Trying to reverse engineer GoodShort internal API',
-                example: '/book/31001241758?lang=in'
+                working_example: '/book/31001241758?lang=in'
             });
         }
         
@@ -319,9 +70,9 @@ export default async function handler(req, res) {
             return res.json({
                 status: 'success',
                 data: [
-                    { id: 'home', title: 'Home', path: '/home' },
-                    { id: 'hot', title: 'Hot', path: '/hot' },
-                    { id: 'search', title: 'Search', path: '/search' }
+                    { id: 'home', title: 'Home', path: '/home?lang=in' },
+                    { id: 'hot', title: 'Hot', path: '/hot?lang=in' },
+                    { id: 'search', title: 'Search', path: '/search?q=drama&lang=in' }
                 ]
             });
         }
@@ -329,19 +80,29 @@ export default async function handler(req, res) {
         // GET /home
         if (parts[0] === 'home') {
             const lang = query.lang || 'in';
-            const data = await getHome(lang);
+            
+            // Try different endpoints
+            let data = await callAPI('/home', { lang });
             
             if (!data) {
+                data = await callAPI('/book/list', { lang });
+            }
+            
+            if (!data) {
+                data = await callAPI('/book/recommend', { lang });
+            }
+            
+            if (!data || !data.success) {
                 return res.status(500).json({
                     status: 'error',
-                    message: 'Failed to fetch home data. API endpoint not found.'
+                    message: 'Failed to fetch home data'
                 });
             }
             
             return res.json({
                 status: 'success',
                 lang: lang,
-                data: data
+                data: data.data
             });
         }
         
@@ -353,16 +114,19 @@ export default async function handler(req, res) {
             if (!q) {
                 return res.status(400).json({
                     status: 'error',
-                    message: 'Query parameter "q" required'
+                    message: 'Query parameter "q" required. Example: /search?q=drama&lang=in'
                 });
             }
             
-            const data = await search(q, lang);
+            const data = await callAPI('/book/search', {
+                keyword: q,
+                lang: lang
+            });
             
-            if (!data) {
+            if (!data || !data.success) {
                 return res.status(500).json({
                     status: 'error',
-                    message: 'Search failed. API endpoint not found.'
+                    message: 'Search failed'
                 });
             }
             
@@ -370,30 +134,32 @@ export default async function handler(req, res) {
                 status: 'success',
                 query: q,
                 lang: lang,
-                data: data
+                total: data.data.list ? data.data.list.length : 0,
+                data: data.data
             });
         }
         
         // GET /hot
         if (parts[0] === 'hot') {
             const lang = query.lang || 'in';
-            const data = await getHome(lang);
             
-            if (!data || !data.data) {
+            let data = await callAPI('/book/hot', { lang });
+            
+            if (!data) {
+                data = await callAPI('/book/recommend', { lang });
+            }
+            
+            if (!data || !data.success) {
                 return res.status(500).json({
                     status: 'error',
                     message: 'Failed to fetch hot dramas'
                 });
             }
             
-            // Ambil 10 pertama
-            const hotList = Array.isArray(data.data.list) ? data.data.list.slice(0, 10) : [];
-            
             return res.json({
                 status: 'success',
                 lang: lang,
-                total: hotList.length,
-                data: hotList
+                data: data.data
             });
         }
         
@@ -402,21 +168,57 @@ export default async function handler(req, res) {
             const bookId = parts[1];
             const lang = query.lang || 'in';
             
-            const book = await getBookDetail(bookId, lang);
+            // ENDPOINT YANG LU TUNJUKIN: /book/quick/open
+            const data = await callAPI('/book/quick/open', {
+                bookId: bookId,
+                lang: lang
+            });
             
-            if (!book) {
+            if (!data || !data.success) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Book not found. Unable to find working API endpoint.',
+                    message: 'Book not found',
                     book_id: bookId,
-                    lang: lang,
-                    hint: 'GoodShort API might have changed. Check network tab in browser.'
+                    lang: lang
                 });
             }
             
+            // Format response
+            const book = data.data.book;
+            const chapters = data.data.list || [];
+            
             return res.json({
                 status: 'success',
-                data: book
+                data: {
+                    id: book.bookId,
+                    title: book.bookName,
+                    description: book.introduction,
+                    cover: book.cover || book.bookDetailCover,
+                    author: book.playwright || book.producer,
+                    protagonist: book.protagonist,
+                    language: book.languageDisplay,
+                    status: book.writeStatus,
+                    rating: book.ratings,
+                    views: book.viewCount,
+                    view_display: book.viewCountDisplay,
+                    tags: book.labels || [],
+                    chapter_count: book.chapterCount,
+                    comment_count: book.commentCount,
+                    follow_count: book.followCount,
+                    total_chapters: chapters.length,
+                    chapters: chapters.map(ch => ({
+                        id: ch.id,
+                        chapter_number: ch.index + 1,
+                        title: ch.chapterName,
+                        image: ch.image,
+                        play_time: ch.playTime,
+                        play_count: ch.playCount,
+                        price: ch.price,
+                        charged: ch.charged,
+                        next_chapter_id: ch.nextChapterId,
+                        prev_chapter_id: ch.prevChapterId
+                    }))
+                }
             });
         }
         
@@ -425,22 +227,36 @@ export default async function handler(req, res) {
             const bookId = parts[1];
             const lang = query.lang || 'in';
             
-            const book = await getBookDetail(bookId, lang);
+            const data = await callAPI('/book/quick/open', {
+                bookId: bookId,
+                lang: lang
+            });
             
-            if (!book) {
+            if (!data || !data.success) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'Book not found'
                 });
             }
             
+            const chapters = data.data.list || [];
+            
             return res.json({
                 status: 'success',
                 book_id: bookId,
-                book_title: book.title,
+                book_title: data.data.book.bookName,
                 lang: lang,
-                total: book.chapters.length,
-                data: book.chapters
+                total: chapters.length,
+                data: chapters.map(ch => ({
+                    id: ch.id,
+                    chapter_number: ch.index + 1,
+                    title: ch.chapterName,
+                    image: ch.image,
+                    play_time: ch.playTime,
+                    play_count: ch.playCount,
+                    next_chapter_id: ch.nextChapterId,
+                    prev_chapter_id: ch.prevChapterId
+                }))
             });
         }
         
@@ -449,9 +265,12 @@ export default async function handler(req, res) {
             const chapterId = parts[1];
             const lang = query.lang || 'in';
             
-            const chapter = await getChapterDetail(chapterId, lang);
+            const data = await callAPI('/book/chapter/open', {
+                chapterId: chapterId,
+                lang: lang
+            });
             
-            if (!chapter) {
+            if (!data || !data.success) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'Chapter not found',
@@ -459,9 +278,46 @@ export default async function handler(req, res) {
                 });
             }
             
+            const ch = data.data;
+            
+            // Extract video sources
+            const sources = [];
+            
+            if (ch.cdn) {
+                sources.push({ type: 'm3u8', quality: 'default', url: ch.cdn });
+            }
+            
+            if (ch.multiVideos) {
+                ch.multiVideos.forEach(v => {
+                    sources.push({ type: 'm3u8', quality: v.type, url: v.filePath });
+                    
+                    if (v.cdnList) {
+                        v.cdnList.forEach(cdn => {
+                            sources.push({
+                                type: 'm3u8',
+                                quality: `${v.type}_cdn`,
+                                url: cdn.videoPath,
+                                cdn_domain: cdn.cdnDomain
+                            });
+                        });
+                    }
+                });
+            }
+            
             return res.json({
                 status: 'success',
-                data: chapter
+                data: {
+                    id: ch.id,
+                    book_id: ch.bookId,
+                    title: ch.chapterName,
+                    image: ch.image,
+                    play_time: ch.playTime,
+                    index: ch.index,
+                    next_chapter_id: ch.nextChapterId,
+                    prev_chapter_id: ch.prevChapterId,
+                    total_sources: sources.length,
+                    sources: sources
+                }
             });
         }
         
@@ -470,24 +326,38 @@ export default async function handler(req, res) {
             const chapterId = parts[1];
             const lang = query.lang || 'in';
             
-            const chapter = await getChapterDetail(chapterId, lang);
+            const data = await callAPI('/book/chapter/open', {
+                chapterId: chapterId,
+                lang: lang
+            });
             
-            if (!chapter || chapter.sources.length === 0) {
+            if (!data || !data.success) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'No stream found'
+                    message: 'Stream not found'
                 });
             }
             
-            // Priority: 1080p > 720p > 540p > default
-            const priorities = ['1080p', '720p', '540p', 'default'];
-            let bestStream = chapter.sources[0];
+            const ch = data.data;
             
-            for (const quality of priorities) {
-                const found = chapter.sources.find(s => s.quality === quality);
-                if (found) {
-                    bestStream = found;
-                    break;
+            // Get best quality (1080p prioritized)
+            let bestUrl = ch.cdn || '';
+            let quality = 'default';
+            
+            if (ch.multiVideos) {
+                const video1080 = ch.multiVideos.find(v => v.type === '1080p');
+                const video720 = ch.multiVideos.find(v => v.type === '720p');
+                const video540 = ch.multiVideos.find(v => v.type === '540p');
+                
+                if (video1080) {
+                    bestUrl = video1080.filePath;
+                    quality = '1080p';
+                } else if (video720) {
+                    bestUrl = video720.filePath;
+                    quality = '720p';
+                } else if (video540) {
+                    bestUrl = video540.filePath;
+                    quality = '540p';
                 }
             }
             
@@ -495,10 +365,9 @@ export default async function handler(req, res) {
                 status: 'success',
                 data: {
                     id: chapterId,
-                    stream_url: bestStream.url,
-                    type: bestStream.type,
-                    quality: bestStream.quality,
-                    all_sources: chapter.sources
+                    stream_url: bestUrl,
+                    type: 'm3u8',
+                    quality: quality
                 }
             });
         }
