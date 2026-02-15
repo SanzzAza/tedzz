@@ -32,52 +32,66 @@ class handler(BaseHTTPRequestHandler):
             dramas = []
             seen_ids = set()
             
-            # Strategy 1: Find all href with 10+ digit ID
-            href_pattern = r'href=["\']([^"\']*?/(\d{10,})(?:/|["\']))'
-            href_matches = re.finditer(href_pattern, html)
+            # Pattern untuk card/item drama
+            card_pattern = r'<(?:div|article|li)[^>]*class=["\'][^"\']*(?:card|item|drama|video|movie)[^"\']*["\'][^>]*>(.*?)</(?:div|article|li)>'
+            card_matches = re.finditer(card_pattern, html, re.DOTALL | re.IGNORECASE)
             
-            for match in href_matches:
-                url = match.group(1)
-                drama_id = match.group(2)
+            for card_match in card_matches:
+                card_html = card_match.group(1)
+                
+                # Extract ID from href
+                id_pattern = r'href=["\'][^"\']*?/(\d{10,})[^"\']*["\']'
+                id_match = re.search(id_pattern, card_html)
+                
+                if not id_match:
+                    continue
+                
+                drama_id = id_match.group(1)
                 
                 if drama_id in seen_ids:
                     continue
                 
-                # Find context around this link (500 chars before and after)
-                start = max(0, match.start() - 500)
-                end = min(len(html), match.end() + 500)
-                context = html[start:end]
+                # Extract URL
+                url_match = re.search(r'href=["\']([^"\']+)["\']', card_html)
+                url = url_match.group(1) if url_match else f"/id/{drama_id}"
                 
-                # Find image in context
-                img_pattern = r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\'][^>]*>'
-                img_match = re.search(img_pattern, context)
+                # Extract thumbnail - multiple strategies
+                thumbnail = ''
                 
-                if not img_match:
-                    continue
+                # Try data-src first (lazy loading)
+                img_patterns = [
+                    r'<img[^>]*data-src=["\']([^"\']+)["\']',
+                    r'<img[^>]*data-original=["\']([^"\']+)["\']',
+                    r'<img[^>]*src=["\']([^"\']+)["\']',
+                    r'background-image:\s*url\(["\']?([^"\')\s]+)["\']?\)'
+                ]
                 
-                thumbnail = img_match.group(1)
+                for pattern in img_patterns:
+                    img_match = re.search(pattern, card_html)
+                    if img_match:
+                        thumbnail = img_match.group(1)
+                        # Skip placeholder images
+                        if 'default-book-cover' not in thumbnail and 'logo.png' not in thumbnail:
+                            break
                 
-                # Find title from alt, title attribute, or nearby text
+                # Extract title - multiple strategies
                 title = ''
+                title_patterns = [
+                    r'<(?:h\d|span|div)[^>]*class=["\'][^"\']*title[^"\']*["\'][^>]*>([^<]+)<',
+                    r'alt=["\']([^"\']+)["\']',
+                    r'title=["\']([^"\']+)["\']',
+                    r'<(?:h\d|p|span)[^>]*>([^<]{3,100})<'
+                ]
                 
-                # Try alt attribute
-                alt_match = re.search(r'alt=["\']([^"\']+)["\']', context)
-                if alt_match:
-                    title = alt_match.group(1)
-                
-                # Try title attribute
-                if not title:
-                    title_match = re.search(r'title=["\']([^"\']+)["\']', context)
+                for pattern in title_patterns:
+                    title_match = re.search(pattern, card_html)
                     if title_match:
-                        title = title_match.group(1)
+                        potential_title = title_match.group(1).strip()
+                        if len(potential_title) > 2 and not potential_title.isdigit():
+                            title = potential_title
+                            break
                 
-                # Try text content
                 if not title:
-                    text_match = re.search(r'>([^<]{3,100})<', context)
-                    if text_match:
-                        title = text_match.group(1).strip()
-                
-                if not title or len(title) < 2:
                     title = f"Drama {drama_id}"
                 
                 seen_ids.add(drama_id)
@@ -85,60 +99,59 @@ class handler(BaseHTTPRequestHandler):
                 # Clean URLs
                 if not url.startswith('http'):
                     url = 'https://www.goodshort.com' + (url if url.startswith('/') else '/' + url)
-                if not thumbnail.startswith('http'):
-                    thumbnail = 'https://www.goodshort.com' + (thumbnail if thumbnail.startswith('/') else '/' + thumbnail)
+                
+                if thumbnail:
+                    if thumbnail.startswith('//'):
+                        thumbnail = 'https:' + thumbnail
+                    elif not thumbnail.startswith('http'):
+                        thumbnail = 'https://www.goodshort.com' + (thumbnail if thumbnail.startswith('/') else '/' + thumbnail)
                 
                 dramas.append({
                     'id': drama_id,
                     'title': title[:200],
-                    'url': url.replace('"', '').replace("'", ''),
-                    'thumbnail': thumbnail
+                    'url': url,
+                    'thumbnail': thumbnail or 'https://www.goodshort.com/default.jpg'
                 })
             
-            # Strategy 2: Find all IDs in entire HTML
-            if len(dramas) < 5:
-                all_ids = re.findall(r'(\d{10,})', html)
-                unique_ids = list(set(all_ids))[:50]  # Take first 50 unique IDs
+            # Fallback: Find all links with drama IDs
+            if len(dramas) < 10:
+                link_pattern = r'<a[^>]*href=["\']([^"\']*?/(\d{10,})[^"\']*)["\'][^>]*>(.*?)</a>'
+                link_matches = re.finditer(link_pattern, html, re.DOTALL)
                 
-                for drama_id in unique_ids:
+                for match in link_matches[:50]:  # Limit to avoid timeout
+                    url = match.group(1)
+                    drama_id = match.group(2)
+                    inner_html = match.group(3)
+                    
                     if drama_id in seen_ids:
                         continue
                     
-                    # Find context
-                    id_pattern = re.escape(drama_id)
-                    match = re.search(id_pattern, html)
-                    if not match:
-                        continue
-                    
-                    start = max(0, match.start() - 1000)
-                    end = min(len(html), match.end() + 1000)
-                    context = html[start:end]
-                    
-                    # Find image
-                    img_match = re.search(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']', context)
-                    if not img_match:
-                        continue
-                    
-                    thumbnail = img_match.group(1)
+                    # Find any image nearby
+                    img_match = re.search(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']', inner_html)
+                    thumbnail = img_match.group(1) if img_match else ''
                     
                     # Find title
-                    title = ''
-                    alt_match = re.search(r'alt=["\']([^"\']{2,})["\']', context)
-                    if alt_match:
-                        title = alt_match.group(1)
+                    title_match = re.search(r'(?:alt|title)=["\']([^"\']+)["\']', inner_html)
+                    if not title_match:
+                        title_match = re.search(r'>([^<]{3,100})<', inner_html)
                     
-                    if not title:
-                        title = f"Drama {drama_id}"
+                    title = title_match.group(1).strip() if title_match else f"Drama {drama_id}"
                     
                     seen_ids.add(drama_id)
                     
-                    if not thumbnail.startswith('http'):
-                        thumbnail = 'https://www.goodshort.com' + (thumbnail if thumbnail.startswith('/') else '/' + thumbnail)
+                    if not url.startswith('http'):
+                        url = 'https://www.goodshort.com' + url
+                    
+                    if thumbnail:
+                        if thumbnail.startswith('//'):
+                            thumbnail = 'https:' + thumbnail
+                        elif not thumbnail.startswith('http'):
+                            thumbnail = 'https://www.goodshort.com' + thumbnail
                     
                     dramas.append({
                         'id': drama_id,
                         'title': title[:200],
-                        'url': f"https://www.goodshort.com/id/{drama_id}",
+                        'url': url,
                         'thumbnail': thumbnail
                     })
             
@@ -147,17 +160,18 @@ class handler(BaseHTTPRequestHandler):
         def extract_book_detail(html, book_id):
             # Title
             title = ''
-            patterns = [
+            title_patterns = [
                 r'<h1[^>]*>([^<]+)</h1>',
-                r'<h2[^>]*>([^<]+)</h2>',
                 r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']',
                 r'<title>([^<]+)</title>'
             ]
             
-            for pattern in patterns:
+            for pattern in title_patterns:
                 match = re.search(pattern, html, re.IGNORECASE)
                 if match:
                     title = match.group(1).strip()
+                    # Clean title
+                    title = title.split('|')[0].split('-')[0].strip()
                     if len(title) > 2:
                         break
             
@@ -166,37 +180,65 @@ class handler(BaseHTTPRequestHandler):
             
             # Description
             desc = ''
-            desc_patterns = [
-                r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']',
-                r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']'
-            ]
+            desc_match = re.search(r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            if desc_match:
+                desc = desc_match.group(1)
             
-            for pattern in desc_patterns:
-                match = re.search(pattern, html, re.IGNORECASE)
-                if match:
-                    desc = match.group(1)
-                    break
-            
-            # Thumbnail
+            # Thumbnail - try multiple sources
             thumb = ''
             thumb_patterns = [
                 r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
-                r'<img[^>]*class=["\'][^"\']*(?:cover|poster)[^"\']*["\'][^>]*src=["\']([^"\']+)["\']'
+                r'<img[^>]*class=["\'][^"\']*(?:cover|poster|thumb)[^"\']*["\'][^>]*src=["\']([^"\']+)["\']',
+                r'<div[^>]*class=["\'][^"\']*(?:cover|poster)[^"\']*["\'][^>]*>.*?<img[^>]*src=["\']([^"\']+)["\']'
             ]
             
             for pattern in thumb_patterns:
-                match = re.search(pattern, html, re.IGNORECASE)
+                match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
                 if match:
                     thumb = match.group(1)
-                    break
+                    if 'default-book-cover' not in thumb and 'logo.png' not in thumb:
+                        break
             
-            # Chapters - Multiple strategies
+            if thumb and not thumb.startswith('http'):
+                if thumb.startswith('//'):
+                    thumb = 'https:' + thumb
+                else:
+                    thumb = 'https://www.goodshort.com' + thumb
+            
+            # Tags
+            tags = []
+            tag_pattern = r'<(?:span|a|div)[^>]*class=["\'][^"\']*(?:tag|label|genre|badge)[^"\']*["\'][^>]*>([^<]+)<'
+            for match in re.finditer(tag_pattern, html, re.IGNORECASE):
+                tag = match.group(1).strip()
+                if 1 < len(tag) < 50 and tag not in tags:
+                    tags.append(tag)
+                    if len(tags) >= 10:
+                        break
+            
+            # Chapters
             chapters = []
             seen_ch = set()
             
-            # Strategy 1: Episode text pattern
-            ep_pattern = r'<a[^>]*href=["\']([^"\']*?/(\d{10,})(?:/|["\']))[^>]*>([^<]*?(?:episode|ep|part|chapter)[^<]*?)</a>'
-            for match in re.finditer(ep_pattern, html, re.IGNORECASE):
+            # Find episode container first
+            episode_container = ''
+            container_patterns = [
+                r'<(?:div|ul|section)[^>]*class=["\'][^"\']*(?:episode|chapter|list)[^"\']*["\'][^>]*>(.*?)</(?:div|ul|section)>',
+                r'<(?:div|ul|section)[^>]*id=["\'][^"\']*(?:episode|chapter)[^"\']*["\'][^>]*>(.*?)</(?:div|ul|section)>'
+            ]
+            
+            for pattern in container_patterns:
+                match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+                if match:
+                    episode_container = match.group(1)
+                    break
+            
+            # If no container found, use entire HTML
+            if not episode_container:
+                episode_container = html
+            
+            # Find episodes
+            ep_pattern = r'<a[^>]*href=["\']([^"\']*?/(\d{10,})[^"\']*)["\'][^>]*>([^<]*(?:episode|ep|part|chapter|Episode|Ep|第)[^<]*)</a>'
+            for match in re.finditer(ep_pattern, episode_container, re.IGNORECASE):
                 ch_url = match.group(1)
                 ch_id = match.group(2)
                 ch_title = match.group(3).strip()
@@ -206,39 +248,21 @@ class handler(BaseHTTPRequestHandler):
                 
                 seen_ch.add(ch_id)
                 
+                # Extract episode number
                 num_match = re.search(r'\d+', ch_title)
                 ep_num = int(num_match.group(0)) if num_match else len(chapters) + 1
                 
                 if not ch_url.startswith('http'):
-                    ch_url = 'https://www.goodshort.com' + (ch_url if ch_url.startswith('/') else '/' + ch_url)
+                    ch_url = 'https://www.goodshort.com' + ch_url
                 
                 chapters.append({
                     'id': ch_id,
                     'chapter_number': ep_num,
                     'title': ch_title or f"Episode {ep_num}",
-                    'url': ch_url.replace('"', '').replace("'", '')
+                    'url': ch_url
                 })
             
-            # Strategy 2: Find all IDs different from book_id
-            if len(chapters) < 5:
-                all_ids = re.findall(r'/(\d{10,})', html)
-                for ch_id in all_ids:
-                    if ch_id == book_id or ch_id in seen_ch:
-                        continue
-                    
-                    seen_ch.add(ch_id)
-                    ep_num = len(chapters) + 1
-                    
-                    chapters.append({
-                        'id': ch_id,
-                        'chapter_number': ep_num,
-                        'title': f"Episode {ep_num}",
-                        'url': f"https://www.goodshort.com/id/{ch_id}"
-                    })
-                    
-                    if len(chapters) >= 60:  # Limit
-                        break
-            
+            # Sort chapters
             chapters.sort(key=lambda x: x['chapter_number'])
             
             return {
@@ -246,6 +270,7 @@ class handler(BaseHTTPRequestHandler):
                 'title': title,
                 'description': desc,
                 'thumbnail': thumb,
+                'tags': tags,
                 'total_chapters': len(chapters),
                 'chapters': chapters
             }
@@ -254,16 +279,38 @@ class handler(BaseHTTPRequestHandler):
             sources = []
             seen = set()
             
-            patterns = [
-                (r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', 'm3u8'),
-                (r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', 'mp4'),
-                (r'(https?://[^\s"\'<>]+\.webm[^\s"\'<>]*)', 'webm'),
-                (r'"file":\s*"([^"]+)"', 'auto'),
-                (r'"source":\s*"([^"]+)"', 'auto'),
-                (r'"url":\s*"([^"]+)"', 'auto'),
+            # Direct video URLs in HTML
+            video_patterns = [
+                (r'<video[^>]*src=["\']([^"\']+)["\']', 'video'),
+                (r'<source[^>]*src=["\']([^"\']+)["\']', 'video'),
+                (r'<iframe[^>]*src=["\']([^"\']+)["\']', 'iframe'),
             ]
             
-            for pattern, vid_type in patterns:
+            for pattern, vid_type in video_patterns:
+                for match in re.finditer(pattern, html, re.IGNORECASE):
+                    url = match.group(1)
+                    if url and url not in seen:
+                        seen.add(url)
+                        if not url.startswith('http'):
+                            url = 'https://www.goodshort.com' + url
+                        sources.append({
+                            'type': vid_type,
+                            'quality': 'auto',
+                            'url': url
+                        })
+            
+            # URLs in JavaScript
+            js_patterns = [
+                (r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', 'm3u8'),
+                (r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', 'mp4'),
+                (r'"file"\s*:\s*"([^"]+)"', 'auto'),
+                (r'"source"\s*:\s*"([^"]+)"', 'auto'),
+                (r'"url"\s*:\s*"([^"]+)"', 'auto'),
+                (r'videoUrl\s*[:=]\s*["\']([^"\']+)["\']', 'auto'),
+                (r'playUrl\s*[:=]\s*["\']([^"\']+)["\']', 'auto')
+            ]
+            
+            for pattern, vid_type in js_patterns:
                 for match in re.finditer(pattern, html, re.IGNORECASE):
                     url = match.group(1)
                     
@@ -275,11 +322,14 @@ class handler(BaseHTTPRequestHandler):
                     
                     seen.add(url)
                     
+                    # Detect type
                     if vid_type == 'auto':
                         if '.m3u8' in url:
                             vid_type = 'm3u8'
                         elif '.mp4' in url:
                             vid_type = 'mp4'
+                        elif '.webm' in url:
+                            vid_type = 'webm'
                         else:
                             vid_type = 'video'
                     
@@ -299,45 +349,43 @@ class handler(BaseHTTPRequestHandler):
             # Root
             if not parts:
                 response = {
-                    'service': 'GoodShort API',
-                    'version': '17.0',
+                    'service': 'GoodShort Scraper API',
+                    'version': '18.0',
                     'status': 'online',
                     'endpoints': {
-                        '/home?lang=id': 'Get dramas',
-                        '/search?q=keyword&lang=id': 'Search',
-                        '/book/{id}?lang=id': 'Book detail',
-                        '/chapters/{id}?lang=id': 'Chapters',
-                        '/play/{id}?lang=id': 'Video sources',
-                        '/m3u8/{id}?lang=id': 'Stream URL',
+                        '/home?lang=id': 'Get all dramas',
+                        '/search?q=keyword&lang=id': 'Search dramas',
+                        '/book/{id}?lang=id': 'Book detail with chapters',
+                        '/chapters/{id}?lang=id': 'Get chapters only',
+                        '/play/{id}?lang=id': 'Get video sources',
+                        '/m3u8/{id}?lang=id': 'Get best stream URL',
                         '/debug?lang=id': 'Debug mode'
-                    }
+                    },
+                    'example': '/book/31001161807?lang=id'
                 }
             
-            # Debug mode
+            # Debug
             elif parts[0] == 'debug':
                 url = f"https://www.goodshort.com/{lang}"
                 html = fetch_html(url)
                 
                 if html:
-                    # Sample HTML
-                    sample = html[:5000]
+                    # Find sample drama cards
+                    sample_cards = []
+                    card_pattern = r'<(?:div|article|li)[^>]*class=["\'][^"\']*(?:card|item|drama|video)[^"\']*["\'][^>]*>(.*?)</(?:div|article|li)>'
+                    matches = re.finditer(card_pattern, html[:50000], re.DOTALL | re.IGNORECASE)
                     
-                    # Find all IDs
-                    all_ids = re.findall(r'(\d{10,})', html)
-                    unique_ids = list(set(all_ids))[:10]
+                    for match in list(matches)[:3]:
+                        sample_cards.append(match.group(0)[:500])
                     
                     response = {
                         'status': 'success',
                         'html_length': len(html),
-                        'sample_html': sample,
-                        'found_ids': unique_ids,
-                        'total_unique_ids': len(set(all_ids))
+                        'sample_cards': sample_cards,
+                        'total_ids_found': len(re.findall(r'\d{10,}', html))
                     }
                 else:
-                    response = {
-                        'status': 'error',
-                        'message': 'Failed to fetch HTML'
-                    }
+                    response = {'status': 'error', 'message': 'Failed to fetch'}
             
             # Home
             elif parts[0] == 'home':
@@ -370,6 +418,7 @@ class handler(BaseHTTPRequestHandler):
                         response = {
                             'status': 'success',
                             'query': q,
+                            'lang': lang,
                             'total': len(results),
                             'data': results
                         }
@@ -455,7 +504,7 @@ class handler(BaseHTTPRequestHandler):
                         }
                     }
                 else:
-                    response = {'status': 'error', 'message': 'No sources'}
+                    response = {'status': 'error', 'message': 'No sources found'}
             
             # M3U8
             elif parts[0] == 'm3u8' and len(parts) > 1:
@@ -477,10 +526,16 @@ class handler(BaseHTTPRequestHandler):
                 
                 best = None
                 if sources:
+                    # Priority: m3u8 > mp4 > video
                     for s in sources:
                         if s['type'] == 'm3u8':
                             best = s
                             break
+                    if not best:
+                        for s in sources:
+                            if s['type'] == 'mp4':
+                                best = s
+                                break
                     if not best:
                         best = sources[0]
                 
@@ -490,14 +545,15 @@ class handler(BaseHTTPRequestHandler):
                         'data': {
                             'id': chapter_id,
                             'stream_url': best['url'],
-                            'type': best['type']
+                            'type': best['type'],
+                            'quality': best['quality']
                         }
                     }
                 else:
-                    response = {'status': 'error', 'message': 'No stream'}
+                    response = {'status': 'error', 'message': 'No stream found'}
             
             else:
-                response = {'status': 'error', 'message': 'Not found'}
+                response = {'status': 'error', 'message': 'Endpoint not found', 'path': path}
             
             self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
             
