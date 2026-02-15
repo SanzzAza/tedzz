@@ -1,15 +1,9 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/index.js",
-      "use": "@vercel/node"
-    }
-  ],
   "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "/api/index.js"
-    }
+    { "src": "/api/drama/(?<id>[^/]+)", "dest": "/api/drama/[id].js?id=$id" },
+    { "src": "/api/episodes/(?<id>[^/]+)", "dest": "/api/episodes/[id].js?id=$id" },
+    { "src": "/api/watch/(?<id>[^/]+)", "dest": "/api/watch/[id].js?id=$id" },
+    { "src": "/(.*)", "dest": "/api/$1" }
   ]
 }
