@@ -1,13 +1,18 @@
 module.exports = (req, res) => {
   res.json({
-    message: "GoodShort Unofficial API",
+    name: "GoodShort Unofficial API",
+    version: "1.0.0",
     endpoints: {
-      "GET /api/dramas?page=1": "List semua drama",
-      "GET /api/drama/:id": "Detail drama",
-      "GET /api/episodes/:dramaId": "List episode",
-      "GET /api/watch/:episodeId": "URL streaming",
-      "GET /api/search?q=keyword": "Cari drama"
+      "GET /api/dramas?page=1": "List all dramas",
+      "GET /api/drama/:id": "Get drama details",
+      "GET /api/episodes/:dramaId": "Get episodes list",
+      "GET /api/watch/:episodeId": "Get streaming URL",
+      "GET /api/search?q=keyword": "Search dramas"
     },
-    example: "https://your-domain.vercel.app/api/dramas"
+    example: {
+      list: "https://your-domain.vercel.app/api/dramas",
+      search: "https://your-domain.vercel.app/api/search?q=romance",
+      detail: "https://your-domain.vercel.app/api/drama/12345"
+    }
   });
 };
