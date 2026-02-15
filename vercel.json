@@ -1,9 +1,6 @@
 {
   "version": 2,
   "routes": [
-    { "src": "/api/drama/(?<id>[^/]+)", "dest": "/api/drama/[id].js?id=$id" },
-    { "src": "/api/episodes/(?<id>[^/]+)", "dest": "/api/episodes/[id].js?id=$id" },
-    { "src": "/api/watch/(?<id>[^/]+)", "dest": "/api/watch/[id].js?id=$id" },
-    { "src": "/(.*)", "dest": "/api/$1" }
+    { "src": "/api/(.*)", "dest": "/api/$1" }
   ]
 }
