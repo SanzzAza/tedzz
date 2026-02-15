@@ -1,379 +1,434 @@
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from bs4 import BeautifulSoup
-import requests
+import urllib.request
 import json
 import re
 
-BASE_URL = 'https://www.goodshort.com'
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
-}
-
-def fetch_page(url):
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            return response.text
-        return None
-    except:
-        return None
-
-def scrape_home(lang='id'):
-    html = fetch_page(f"{BASE_URL}/{lang}")
-    if not html:
-        return []
-    
-    soup = BeautifulSoup(html, 'lxml')
-    dramas = []
-    seen = set()
-    
-    for link in soup.find_all('a', href=True):
-        href = link['href']
-        id_match = re.search(r'/(\d{10,})', href)
-        
-        if not id_match or id_match.group(1) in seen:
-            continue
-        
-        img = link.find('img')
-        if not img:
-            continue
-        
-        drama_id = id_match.group(1)
-        seen.add(drama_id)
-        
-        dramas.append({
-            'id': drama_id,
-            'title': (link.get('title') or img.get('alt') or 'No Title')[:200],
-            'url': href if href.startswith('http') else f"{BASE_URL}{href}",
-            'thumbnail': (img.get('src') or img.get('data-src') or ''),
-            'lang': lang
-        })
-    
-    return dramas
-
-def scrape_book(book_id, lang='id'):
-    patterns = [
-        f"{BASE_URL}/{lang}/{book_id}",
-        f"{BASE_URL}/{book_id}",
-        f"{BASE_URL}/{lang}/drama/{book_id}",
-        f"{BASE_URL}/drama/{book_id}"
-    ]
-    
-    html = None
-    for url in patterns:
-        html = fetch_page(url)
-        if html and len(html) > 5000:
-            break
-    
-    if not html:
-        return None
-    
-    soup = BeautifulSoup(html, 'lxml')
-    
-    # Title
-    title = ''
-    h1 = soup.find('h1')
-    if h1:
-        title = h1.get_text(strip=True)
-    
-    if not title:
-        meta = soup.find('meta', property='og:title')
-        if meta:
-            title = meta.get('content', '')
-    
-    if not title or len(title) < 2:
-        return None
-    
-    # Description
-    desc = ''
-    meta_desc = soup.find('meta', property='og:description')
-    if meta_desc:
-        desc = meta_desc.get('content', '')
-    
-    # Thumbnail
-    thumb = ''
-    meta_img = soup.find('meta', property='og:image')
-    if meta_img:
-        thumb = meta_img.get('content', '')
-    
-    # Tags
-    tags = []
-    for elem in soup.select('[class*="tag"], [class*="label"]'):
-        tag = elem.get_text(strip=True)
-        if tag and len(tag) < 50:
-            tags.append(tag)
-    
-    # Chapters
-    chapters = []
-    seen_ch = set()
-    
-    for link in soup.find_all('a', href=True):
-        href = link['href']
-        text = link.get_text(strip=True)
-        
-        if not re.search(r'episode|ep|part|chapter', text + href, re.I):
-            continue
-        
-        ch_match = re.search(r'/(\d{10,})', href)
-        if not ch_match:
-            continue
-        
-        ch_id = ch_match.group(1)
-        if ch_id == book_id or ch_id in seen_ch:
-            continue
-        
-        seen_ch.add(ch_id)
-        
-        num_match = re.search(r'\d+', text)
-        num = int(num_match.group(0)) if num_match else len(chapters) + 1
-        
-        chapters.append({
-            'id': ch_id,
-            'chapter_number': num,
-            'title': text or f"Episode {num}",
-            'url': href if href.startswith('http') else f"{BASE_URL}{href}"
-        })
-    
-    chapters.sort(key=lambda x: x['chapter_number'])
-    
-    return {
-        'id': book_id,
-        'title': title,
-        'description': desc,
-        'thumbnail': thumb,
-        'tags': tags,
-        'total_chapters': len(chapters),
-        'chapters': chapters
-    }
-
-def scrape_chapter(ch_id, lang='id'):
-    patterns = [
-        f"{BASE_URL}/{lang}/{ch_id}",
-        f"{BASE_URL}/{ch_id}",
-        f"{BASE_URL}/{lang}/episode/{ch_id}",
-        f"{BASE_URL}/episode/{ch_id}"
-    ]
-    
-    html = None
-    for url in patterns:
-        html = fetch_page(url)
-        if html and len(html) > 3000:
-            break
-    
-    if not html:
-        return None
-    
-    soup = BeautifulSoup(html, 'lxml')
-    
-    title = ''
-    h1 = soup.find('h1')
-    if h1:
-        title = h1.get_text(strip=True)
-    else:
-        title = f"Episode {ch_id}"
-    
-    sources = []
-    seen = set()
-    
-    # Video tags
-    for video in soup.find_all('video'):
-        src = video.get('src')
-        if src and src not in seen:
-            seen.add(src)
-            sources.append({
-                'type': 'video',
-                'quality': 'auto',
-                'url': src if src.startswith('http') else f"{BASE_URL}{src}"
-            })
-    
-    # Scripts
-    scripts = soup.find_all('script')
-    all_text = '\n'.join([s.string for s in scripts if s.string])
-    
-    for match in re.finditer(r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', all_text, re.I):
-        url = match.group(1)
-        if url not in seen:
-            seen.add(url)
-            sources.append({'type': 'm3u8', 'quality': 'auto', 'url': url})
-    
-    for match in re.finditer(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', all_text, re.I):
-        url = match.group(1)
-        if url not in seen:
-            seen.add(url)
-            sources.append({'type': 'mp4', 'quality': 'auto', 'url': url})
-    
-    return {
-        'id': ch_id,
-        'title': title,
-        'total_sources': len(sources),
-        'sources': sources
-    }
-
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Parse URL
         parsed = urlparse(self.path)
         path = parsed.path
         params = parse_qs(parsed.query)
         
-        lang = params.get('lang', ['id'])[0]
-        q = params.get('q', [''])[0]
+        # Headers untuk response
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
         
-        parts = [p for p in path.split('/') if p]
+        # Helper function untuk fetch HTML
+        def fetch_html(url):
+            try:
+                req = urllib.request.Request(url)
+                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+                req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+                req.add_header('Accept-Language', 'id-ID,id;q=0.9,en-US;q=0.8')
+                
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    return response.read().decode('utf-8')
+            except Exception as e:
+                print(f"Error fetching {url}: {e}")
+                return None
         
+        # Parse HTML dengan regex (tanpa BeautifulSoup)
+        def extract_dramas(html):
+            dramas = []
+            seen_ids = set()
+            
+            # Pattern untuk link drama
+            pattern = r'<a[^>]*href="([^"]*\/(\d{10,})[^"]*)"[^>]*>(.*?)</a>'
+            matches = re.finditer(pattern, html, re.DOTALL)
+            
+            for match in matches:
+                url = match.group(1)
+                drama_id = match.group(2)
+                content = match.group(3)
+                
+                if drama_id in seen_ids:
+                    continue
+                
+                # Cari image
+                img_match = re.search(r'<img[^>]*(?:src|data-src)="([^"]+)"[^>]*(?:alt|title)="([^"]*)"', content)
+                if not img_match:
+                    img_match = re.search(r'<img[^>]*(?:alt|title)="([^"]*)"[^>]*(?:src|data-src)="([^"]+)"', content)
+                    if img_match:
+                        thumbnail = img_match.group(2)
+                        title = img_match.group(1)
+                    else:
+                        continue
+                else:
+                    thumbnail = img_match.group(1)
+                    title = img_match.group(2)
+                
+                if not title:
+                    # Cari title dari text
+                    title_match = re.search(r'>([^<]+)<', content)
+                    if title_match:
+                        title = title_match.group(1).strip()
+                
+                if drama_id and title:
+                    seen_ids.add(drama_id)
+                    
+                    # Clean URL
+                    if not url.startswith('http'):
+                        url = f"https://www.goodshort.com{url}"
+                    if not thumbnail.startswith('http'):
+                        thumbnail = f"https://www.goodshort.com{thumbnail}"
+                    
+                    dramas.append({
+                        'id': drama_id,
+                        'title': title[:200],
+                        'url': url,
+                        'thumbnail': thumbnail
+                    })
+            
+            return dramas
+        
+        # Extract book detail
+        def extract_book_detail(html, book_id):
+            # Extract title
+            title = ''
+            title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
+            if title_match:
+                title = title_match.group(1).strip()
+            else:
+                title_match = re.search(r'<meta[^>]*property="og:title"[^>]*content="([^"]+)"', html)
+                if title_match:
+                    title = title_match.group(1)
+            
+            if not title:
+                return None
+            
+            # Extract description
+            desc = ''
+            desc_match = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]+)"', html)
+            if desc_match:
+                desc = desc_match.group(1)
+            
+            # Extract thumbnail
+            thumb = ''
+            thumb_match = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html)
+            if thumb_match:
+                thumb = thumb_match.group(1)
+            
+            # Extract chapters
+            chapters = []
+            seen_ch = set()
+            
+            # Pattern untuk episode links
+            ep_pattern = r'<a[^>]*href="([^"]*\/(\d{10,})[^"]*)"[^>]*>([^<]*(?:episode|ep|Episode|Ep|Part|Chapter)[^<]*)</a>'
+            ep_matches = re.finditer(ep_pattern, html, re.IGNORECASE)
+            
+            for match in ep_matches:
+                ch_url = match.group(1)
+                ch_id = match.group(2)
+                ch_title = match.group(3).strip()
+                
+                if ch_id == book_id or ch_id in seen_ch:
+                    continue
+                
+                seen_ch.add(ch_id)
+                
+                # Extract episode number
+                num_match = re.search(r'\d+', ch_title)
+                ep_num = int(num_match.group(0)) if num_match else len(chapters) + 1
+                
+                if not ch_url.startswith('http'):
+                    ch_url = f"https://www.goodshort.com{ch_url}"
+                
+                chapters.append({
+                    'id': ch_id,
+                    'chapter_number': ep_num,
+                    'title': ch_title or f"Episode {ep_num}",
+                    'url': ch_url
+                })
+            
+            # Sort chapters
+            chapters.sort(key=lambda x: x['chapter_number'])
+            
+            return {
+                'id': book_id,
+                'title': title,
+                'description': desc,
+                'thumbnail': thumb,
+                'total_chapters': len(chapters),
+                'chapters': chapters
+            }
+        
+        # Extract video sources
+        def extract_video_sources(html):
+            sources = []
+            seen = set()
+            
+            # Pattern untuk m3u8
+            m3u8_pattern = r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)'
+            for match in re.finditer(m3u8_pattern, html):
+                url = match.group(1)
+                if url not in seen:
+                    seen.add(url)
+                    sources.append({
+                        'type': 'm3u8',
+                        'quality': 'auto',
+                        'url': url
+                    })
+            
+            # Pattern untuk mp4
+            mp4_pattern = r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)'
+            for match in re.finditer(mp4_pattern, html):
+                url = match.group(1)
+                if url not in seen:
+                    seen.add(url)
+                    sources.append({
+                        'type': 'mp4',
+                        'quality': 'auto',
+                        'url': url
+                    })
+            
+            # Pattern untuk video src
+            video_pattern = r'<video[^>]*src="([^"]+)"'
+            for match in re.finditer(video_pattern, html):
+                url = match.group(1)
+                if url not in seen:
+                    seen.add(url)
+                    if not url.startswith('http'):
+                        url = f"https://www.goodshort.com{url}"
+                    sources.append({
+                        'type': 'video',
+                        'quality': 'auto',
+                        'url': url
+                    })
+            
+            return sources
+        
+        # Route handling
         try:
-            # Root
+            parts = [p for p in path.split('/') if p]
+            lang = params.get('lang', ['id'])[0]
+            
+            # Root endpoint
             if not parts:
                 response = {
-                    'service': 'GoodShort API',
-                    'version': '14.0',
+                    'service': 'GoodShort Scraper API',
+                    'version': '16.0',
                     'status': 'online',
+                    'type': 'Pure Python Scraper',
                     'endpoints': {
-                        'GET /nav': 'Nav',
-                        'GET /home?lang=id': 'Home',
-                        'GET /search?q=x&lang=id': 'Search',
-                        'GET /hot?lang=id': 'Hot',
-                        'GET /book/{id}?lang=id': 'Book',
-                        'GET /chapters/{id}?lang=id': 'Chapters',
-                        'GET /play/{id}?lang=id': 'Play',
-                        'GET /m3u8/{id}?lang=id': 'M3U8'
+                        '/': 'This info',
+                        '/home?lang=id': 'Get all dramas',
+                        '/search?q=keyword&lang=id': 'Search dramas',
+                        '/book/{id}?lang=id': 'Book detail',
+                        '/chapters/{id}?lang=id': 'Get chapters',
+                        '/play/{id}?lang=id': 'Get video sources',
+                        '/m3u8/{id}?lang=id': 'Get stream URL'
                     }
                 }
             
-            # Nav
-            elif parts[0] == 'nav':
-                response = {
-                    'status': 'success',
-                    'data': [
-                        {'id': 'home', 'title': 'Home', 'path': '/home'},
-                        {'id': 'hot', 'title': 'Hot', 'path': '/hot'},
-                        {'id': 'search', 'title': 'Search', 'path': '/search'}
-                    ]
-                }
-            
-            # Home
+            # Home endpoint
             elif parts[0] == 'home':
-                dramas = scrape_home(lang)
-                response = {
-                    'status': 'success',
-                    'lang': lang,
-                    'total': len(dramas),
-                    'data': dramas
-                }
-            
-            # Search
-            elif parts[0] == 'search':
-                if not q:
-                    self.send_response(400)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Query required'}).encode())
-                    return
+                url = f"https://www.goodshort.com/{lang}"
+                html = fetch_html(url)
                 
-                all_dramas = scrape_home(lang)
-                results = [d for d in all_dramas if q.lower() in d['title'].lower()]
-                response = {
-                    'status': 'success',
-                    'query': q,
-                    'total': len(results),
-                    'data': results
-                }
-            
-            # Hot
-            elif parts[0] == 'hot':
-                dramas = scrape_home(lang)[:10]
-                response = {
-                    'status': 'success',
-                    'total': len(dramas),
-                    'data': dramas
-                }
-            
-            # Book
-            elif parts[0] == 'book' and len(parts) > 1:
-                book = scrape_book(parts[1], lang)
-                if not book:
-                    self.send_response(404)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
-                    return
-                
-                response = {'status': 'success', 'data': book}
-            
-            # Chapters
-            elif parts[0] == 'chapters' and len(parts) > 1:
-                book = scrape_book(parts[1], lang)
-                if not book:
-                    self.send_response(404)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
-                    return
-                
-                response = {
-                    'status': 'success',
-                    'book_id': parts[1],
-                    'book_title': book['title'],
-                    'total': len(book['chapters']),
-                    'data': book['chapters']
-                }
-            
-            # Play
-            elif parts[0] == 'play' and len(parts) > 1:
-                chapter = scrape_chapter(parts[1], lang)
-                if not chapter:
-                    self.send_response(404)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
-                    return
-                
-                response = {'status': 'success', 'data': chapter}
-            
-            # M3U8
-            elif parts[0] == 'm3u8' and len(parts) > 1:
-                chapter = scrape_chapter(parts[1], lang)
-                if not chapter or not chapter['sources']:
-                    self.send_response(404)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'error', 'message': 'No sources'}).encode())
-                    return
-                
-                best = chapter['sources'][0]
-                for s in chapter['sources']:
-                    if s['type'] == 'm3u8':
-                        best = s
-                        break
-                
-                response = {
-                    'status': 'success',
-                    'data': {
-                        'id': parts[1],
-                        'stream_url': best['url'],
-                        'type': best['type'],
-                        'all_sources': chapter['sources']
+                if not html:
+                    response = {
+                        'status': 'error',
+                        'message': 'Failed to fetch home page'
                     }
-                }
+                else:
+                    dramas = extract_dramas(html)
+                    response = {
+                        'status': 'success',
+                        'lang': lang,
+                        'total': len(dramas),
+                        'data': dramas
+                    }
+            
+            # Search endpoint
+            elif parts[0] == 'search':
+                q = params.get('q', [''])[0]
+                if not q:
+                    response = {
+                        'status': 'error',
+                        'message': 'Query parameter "q" required'
+                    }
+                else:
+                    url = f"https://www.goodshort.com/{lang}"
+                    html = fetch_html(url)
+                    
+                    if not html:
+                        response = {
+                            'status': 'error',
+                            'message': 'Failed to fetch data'
+                        }
+                    else:
+                        all_dramas = extract_dramas(html)
+                        results = [d for d in all_dramas if q.lower() in d['title'].lower()]
+                        response = {
+                            'status': 'success',
+                            'query': q,
+                            'lang': lang,
+                            'total': len(results),
+                            'data': results
+                        }
+            
+            # Book detail endpoint
+            elif parts[0] == 'book' and len(parts) > 1:
+                book_id = parts[1]
+                
+                # Try multiple URL patterns
+                urls = [
+                    f"https://www.goodshort.com/{lang}/{book_id}",
+                    f"https://www.goodshort.com/{book_id}",
+                    f"https://www.goodshort.com/{lang}/drama/{book_id}",
+                    f"https://www.goodshort.com/drama/{book_id}"
+                ]
+                
+                book = None
+                for url in urls:
+                    html = fetch_html(url)
+                    if html and len(html) > 5000:
+                        book = extract_book_detail(html, book_id)
+                        if book:
+                            break
+                
+                if book:
+                    response = {
+                        'status': 'success',
+                        'data': book
+                    }
+                else:
+                    response = {
+                        'status': 'error',
+                        'message': 'Book not found',
+                        'book_id': book_id
+                    }
+            
+            # Chapters endpoint
+            elif parts[0] == 'chapters' and len(parts) > 1:
+                book_id = parts[1]
+                
+                urls = [
+                    f"https://www.goodshort.com/{lang}/{book_id}",
+                    f"https://www.goodshort.com/{book_id}",
+                    f"https://www.goodshort.com/{lang}/drama/{book_id}",
+                    f"https://www.goodshort.com/drama/{book_id}"
+                ]
+                
+                book = None
+                for url in urls:
+                    html = fetch_html(url)
+                    if html and len(html) > 5000:
+                        book = extract_book_detail(html, book_id)
+                        if book:
+                            break
+                
+                if book:
+                    response = {
+                        'status': 'success',
+                        'book_id': book_id,
+                        'book_title': book['title'],
+                        'total': len(book['chapters']),
+                        'data': book['chapters']
+                    }
+                else:
+                    response = {
+                        'status': 'error',
+                        'message': 'Book not found'
+                    }
+            
+            # Play endpoint
+            elif parts[0] == 'play' and len(parts) > 1:
+                chapter_id = parts[1]
+                
+                urls = [
+                    f"https://www.goodshort.com/{lang}/{chapter_id}",
+                    f"https://www.goodshort.com/{chapter_id}",
+                    f"https://www.goodshort.com/{lang}/episode/{chapter_id}",
+                    f"https://www.goodshort.com/episode/{chapter_id}"
+                ]
+                
+                sources = []
+                for url in urls:
+                    html = fetch_html(url)
+                    if html:
+                        sources = extract_video_sources(html)
+                        if sources:
+                            break
+                
+                if sources:
+                    response = {
+                        'status': 'success',
+                        'data': {
+                            'id': chapter_id,
+                            'total_sources': len(sources),
+                            'sources': sources
+                        }
+                    }
+                else:
+                    response = {
+                        'status': 'error',
+                        'message': 'No video sources found'
+                    }
+            
+            # M3U8 endpoint
+            elif parts[0] == 'm3u8' and len(parts) > 1:
+                chapter_id = parts[1]
+                
+                urls = [
+                    f"https://www.goodshort.com/{lang}/{chapter_id}",
+                    f"https://www.goodshort.com/{chapter_id}",
+                    f"https://www.goodshort.com/{lang}/episode/{chapter_id}",
+                    f"https://www.goodshort.com/episode/{chapter_id}"
+                ]
+                
+                sources = []
+                for url in urls:
+                    html = fetch_html(url)
+                    if html:
+                        sources = extract_video_sources(html)
+                        if sources:
+                            break
+                
+                # Find best source
+                best = None
+                if sources:
+                    for s in sources:
+                        if s['type'] == 'm3u8':
+                            best = s
+                            break
+                    if not best:
+                        best = sources[0]
+                
+                if best:
+                    response = {
+                        'status': 'success',
+                        'data': {
+                            'id': chapter_id,
+                            'stream_url': best['url'],
+                            'type': best['type'],
+                            'quality': best['quality']
+                        }
+                    }
+                else:
+                    response = {
+                        'status': 'error',
+                        'message': 'No stream found'
+                    }
             
             else:
-                self.send_response(404)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
-                return
+                response = {
+                    'status': 'error',
+                    'message': 'Endpoint not found',
+                    'path': path
+                }
             
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
+            # Send response
             self.wfile.write(json.dumps(response).encode())
-        
+            
         except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'status': 'error', 'message': str(e)}).encode())
+            error_response = {
+                'status': 'error',
+                'message': str(e),
+                'type': type(e).__name__
+            }
+            self.wfile.write(json.dumps(error_response).encode())
