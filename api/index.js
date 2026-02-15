@@ -11,7 +11,7 @@ export default async function handler(req, res) {
         return;
     }
     
-    // Helper: Direct scrape any URL
+    // Helper: Direct scrape
     async function scrapeDirectUrl(url) {
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -28,22 +28,21 @@ export default async function handler(req, res) {
             
             return cheerio.load(response.data);
         } catch (error) {
-            console.error('Error scraping URL:', url, error.message);
+            console.error('Error scraping:', url, error.message);
             return null;
         }
     }
     
     // Helper: Scrape Home
-    async function scrapeHome() {
+    async function scrapeHome(lang = 'id') {
         const baseUrl = 'https://www.goodshort.com';
-        const $ = await scrapeDirectUrl(`${baseUrl}/id`);
+        const $ = await scrapeDirectUrl(`${baseUrl}/${lang}`);
         
         if (!$) return [];
         
         const dramas = [];
-        const seenUrls = new Set();
+        const seenIds = new Set();
         
-        // Strategi 1: Cari semua link dengan img
         $('a').each((i, elem) => {
             const $link = $(elem);
             const href = $link.attr('href') || '';
@@ -53,106 +52,118 @@ export default async function handler(req, res) {
             
             const title = $link.attr('title') || 
                          $img.attr('alt') || 
-                         $link.find('[class*="title"], [class*="name"]').text().trim() ||
-                         $link.text().trim().substring(0, 100);
+                         $link.text().trim();
             
             if (!title || title.length < 3) return;
             
-            const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
+            // Extract ID dari URL
+            // Format: /id/drama/31001241758 atau /drama/31001241758
+            const idMatch = href.match(/\/(\d+)/);
+            const id = idMatch ? idMatch[1] : null;
             
-            if (seenUrls.has(fullHref)) return;
-            seenUrls.add(fullHref);
+            if (!id || seenIds.has(id)) return;
+            seenIds.add(id);
             
             const thumbnail = $img.attr('src') || $img.attr('data-src') || '';
+            const fullUrl = href.startsWith('http') ? href : `${baseUrl}${href}`;
             
             dramas.push({
-                id: href,
+                id: id,
                 title: title,
-                url: fullHref,
+                url: fullUrl,
                 thumbnail: thumbnail.startsWith('http') ? thumbnail : (thumbnail ? `${baseUrl}${thumbnail}` : ''),
-                raw_href: href
+                lang: lang
             });
         });
         
         return dramas;
     }
     
-    // Helper: Scrape Book/Drama Detail
-    async function scrapeBookDetail(bookIdOrUrl) {
+    // Helper: Scrape Book Detail
+    async function scrapeBookDetail(id, lang = 'id') {
         const baseUrl = 'https://www.goodshort.com';
         
-        // Jika sudah full URL, langsung gunakan
-        let targetUrl = bookIdOrUrl;
-        if (!bookIdOrUrl.startsWith('http')) {
-            // Coba berbagai kemungkinan
-            targetUrl = bookIdOrUrl.startsWith('/') ? `${baseUrl}${bookIdOrUrl}` : `${baseUrl}/id/${bookIdOrUrl}`;
+        // Coba berbagai kemungkinan URL pattern
+        const possibleUrls = [
+            `${baseUrl}/${lang}/drama/${id}`,
+            `${baseUrl}/drama/${id}`,
+            `${baseUrl}/${lang}/series/${id}`,
+            `${baseUrl}/series/${id}`,
+            `${baseUrl}/${lang}/video/${id}`,
+            `${baseUrl}/video/${id}`
+        ];
+        
+        for (const url of possibleUrls) {
+            const $ = await scrapeDirectUrl(url);
+            if ($) {
+                const data = extractBookData($, url, id, lang);
+                if (data && data.title !== 'Unknown') {
+                    return data;
+                }
+            }
         }
         
-        const $ = await scrapeDirectUrl(targetUrl);
-        
-        if (!$) {
-            // Coba URL alternatif jika gagal
-            const altUrl = `${baseUrl}${bookIdOrUrl}`;
-            const $alt = await scrapeDirectUrl(altUrl);
-            if (!$alt) return null;
-            return extractBookData($alt, altUrl, bookIdOrUrl);
-        }
-        
-        return extractBookData($, targetUrl, bookIdOrUrl);
+        return null;
     }
     
-    function extractBookData($, sourceUrl, originalId) {
+    function extractBookData($, sourceUrl, id, lang) {
         const baseUrl = 'https://www.goodshort.com';
         
-        // Extract title
         const title = $('h1').first().text().trim() || 
                      $('meta[property="og:title"]').attr('content') || 
-                     $('title').text().trim() || 
+                     $('title').text().split('-')[0].trim() ||
                      'Unknown';
         
-        // Extract description
+        if (title === 'Unknown' || title === '') return null;
+        
         const description = $('meta[property="og:description"]').attr('content') ||
                            $('meta[name="description"]').attr('content') ||
-                           $('[class*="desc"], [class*="summary"], [class*="synopsis"]').first().text().trim() ||
-                           $('p').first().text().trim() ||
+                           $('[class*="desc"], [class*="summary"], [class*="intro"]').first().text().trim() ||
                            '';
         
-        // Extract thumbnail
         const thumbnail = $('meta[property="og:image"]').attr('content') ||
+                         $('img[class*="cover"], img[class*="poster"]').first().attr('src') ||
                          $('img').first().attr('src') ||
                          '';
         
-        // Extract rating
+        // Extract additional info
+        const author = $('[class*="author"]').first().text().trim() || '';
+        const status = $('[class*="status"]').first().text().trim() || '';
         const rating = $('[class*="rating"], [class*="score"]').first().text().trim() || '';
+        const views = $('[class*="view"], [class*="read"]').first().text().trim() || '';
         
-        // Extract tags/genres
+        // Extract tags
         const tags = [];
-        $('[class*="tag"], [class*="genre"], [class*="category"] a, [class*="tag"] span').each((i, elem) => {
+        $('[class*="tag"], [class*="genre"], [class*="category"] a, [class*="label"]').each((i, elem) => {
             const tag = $(elem).text().trim();
-            if (tag && !tags.includes(tag)) {
+            if (tag && tag.length > 1 && !tags.includes(tag)) {
                 tags.push(tag);
             }
         });
         
-        // Extract episodes/chapters
+        // Extract chapters/episodes
         const chapters = [];
-        const seenChapterUrls = new Set();
+        const seenChapterIds = new Set();
         
-        // Cari semua link yang mungkin episode
         $('a').each((i, elem) => {
             const $elem = $(elem);
             const href = $elem.attr('href') || '';
             const text = $elem.text().trim();
             
-            // Filter hanya link episode
+            // Filter episode links
             const isEpisode = href.includes('/episode') || 
                             href.includes('/ep') || 
                             href.includes('/watch') ||
-                            text.match(/episode|ep\s*\d+|part\s*\d+/i);
+                            text.match(/episode|ep\s*\d+|part\s*\d+|chapter\s*\d+/i);
             
-            if (!isEpisode || seenChapterUrls.has(href)) return;
+            if (!isEpisode) return;
             
-            seenChapterUrls.add(href);
+            // Extract chapter ID
+            const chapterIdMatch = href.match(/\/(\d+)/);
+            const chapterId = chapterIdMatch ? chapterIdMatch[1] : null;
+            
+            if (!chapterId || seenChapterIds.has(chapterId)) return;
+            seenChapterIds.add(chapterId);
             
             // Extract episode number
             const numMatch = text.match(/\d+/);
@@ -161,22 +172,27 @@ export default async function handler(req, res) {
             const fullUrl = href.startsWith('http') ? href : `${baseUrl}${href}`;
             
             chapters.push({
-                id: href,
+                id: chapterId,
                 chapter_number: episodeNum,
                 title: text || `Episode ${episodeNum}`,
-                url: fullUrl
+                url: fullUrl,
+                lang: lang
             });
         });
         
-        // Sort chapters
+        // Sort chapters by number
         chapters.sort((a, b) => a.chapter_number - b.chapter_number);
         
         return {
-            id: originalId,
+            id: id,
+            lang: lang,
             title,
             description,
             thumbnail: thumbnail.startsWith('http') ? thumbnail : (thumbnail ? `${baseUrl}${thumbnail}` : ''),
+            author,
+            status,
             rating,
+            views,
             tags,
             total_chapters: chapters.length,
             chapters,
@@ -184,76 +200,88 @@ export default async function handler(req, res) {
         };
     }
     
-    // Helper: Scrape Chapter/Episode Detail
-    async function scrapeChapterDetail(chapterIdOrUrl) {
+    // Helper: Scrape Chapter Detail
+    async function scrapeChapterDetail(chapterId, lang = 'id') {
         const baseUrl = 'https://www.goodshort.com';
         
-        let targetUrl = chapterIdOrUrl;
-        if (!chapterIdOrUrl.startsWith('http')) {
-            targetUrl = chapterIdOrUrl.startsWith('/') ? `${baseUrl}${chapterIdOrUrl}` : `${baseUrl}/id/episode/${chapterIdOrUrl}`;
+        const possibleUrls = [
+            `${baseUrl}/${lang}/episode/${chapterId}`,
+            `${baseUrl}/episode/${chapterId}`,
+            `${baseUrl}/${lang}/ep/${chapterId}`,
+            `${baseUrl}/ep/${chapterId}`,
+            `${baseUrl}/${lang}/watch/${chapterId}`,
+            `${baseUrl}/watch/${chapterId}`
+        ];
+        
+        for (const url of possibleUrls) {
+            const $ = await scrapeDirectUrl(url);
+            if ($) {
+                const data = extractChapterData($, url, chapterId, lang);
+                if (data && data.sources.length > 0) {
+                    return data;
+                }
+            }
         }
         
-        const $ = await scrapeDirectUrl(targetUrl);
-        
-        if (!$) {
-            const altUrl = `${baseUrl}${chapterIdOrUrl}`;
-            const $alt = await scrapeDirectUrl(altUrl);
-            if (!$alt) return null;
-            return extractChapterData($alt, altUrl, chapterIdOrUrl);
-        }
-        
-        return extractChapterData($, targetUrl, chapterIdOrUrl);
+        return null;
     }
     
-    function extractChapterData($, sourceUrl, originalId) {
+    function extractChapterData($, sourceUrl, chapterId, lang) {
         const title = $('h1').first().text().trim() || 
                      $('h2').first().text().trim() || 
                      $('title').text().trim() || 
-                     'Episode';
+                     `Episode ${chapterId}`;
         
         const sources = [];
+        const seenUrls = new Set();
         
         // Method 1: Video tags
         $('video').each((i, video) => {
             const src = $(video).attr('src');
-            if (src) sources.push({ type: 'video', quality: 'auto', url: src });
+            if (src && !seenUrls.has(src)) {
+                seenUrls.add(src);
+                sources.push({ type: 'video', quality: 'auto', url: src });
+            }
             
             $(video).find('source').each((j, source) => {
                 const sourceSrc = $(source).attr('src');
                 const quality = $(source).attr('label') || $(source).attr('res') || 'auto';
-                if (sourceSrc) sources.push({ type: 'video', quality, url: sourceSrc });
+                if (sourceSrc && !seenUrls.has(sourceSrc)) {
+                    seenUrls.add(sourceSrc);
+                    sources.push({ type: 'video', quality, url: sourceSrc });
+                }
             });
         });
         
         // Method 2: Iframes
         $('iframe').each((i, iframe) => {
             const src = $(iframe).attr('src');
-            if (src) sources.push({ type: 'iframe', quality: 'auto', url: src });
+            if (src && !seenUrls.has(src)) {
+                seenUrls.add(src);
+                sources.push({ type: 'iframe', quality: 'auto', url: src });
+            }
         });
         
-        // Method 3: Parse scripts untuk video URLs
+        // Method 3: Script parsing
         $('script').each((i, script) => {
             const content = $(script).html() || '';
             
-            // Pattern untuk berbagai format video
             const patterns = [
                 { regex: /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/g, type: 'm3u8' },
                 { regex: /https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g, type: 'mp4' },
-                { regex: /https?:\/\/[^\s"'<>]+\.webm[^\s"'<>]*/g, type: 'webm' },
                 { regex: /"file"\s*:\s*"([^"]+)"/g, type: 'auto' },
                 { regex: /"source"\s*:\s*"([^"]+)"/g, type: 'auto' },
-                { regex: /"url"\s*:\s*"([^"]+)"/g, type: 'auto' },
-                { regex: /src:\s*["']([^"']+)["']/g, type: 'auto' }
+                { regex: /"url"\s*:\s*"([^"]+)"/g, type: 'auto' }
             ];
             
             patterns.forEach(({ regex, type }) => {
                 let match;
                 while ((match = regex.exec(content)) !== null) {
                     let url = match[1] || match[0];
-                    // Clean up URL
                     url = url.replace(/^["']|["']$/g, '').trim();
                     
-                    if (url.startsWith('http')) {
+                    if (url.startsWith('http') && !seenUrls.has(url)) {
+                        seenUrls.add(url);
                         const finalType = type === 'auto' ? detectVideoType(url) : type;
                         sources.push({ type: finalType, quality: 'auto', url });
                     }
@@ -261,21 +289,12 @@ export default async function handler(req, res) {
             });
         });
         
-        // Remove duplicates
-        const uniqueSources = [];
-        const seenUrls = new Set();
-        sources.forEach(source => {
-            if (!seenUrls.has(source.url)) {
-                seenUrls.add(source.url);
-                uniqueSources.push(source);
-            }
-        });
-        
         return {
-            id: originalId,
+            id: chapterId,
+            lang: lang,
             title,
-            total_sources: uniqueSources.length,
-            sources: uniqueSources,
+            total_sources: sources.length,
+            sources,
             source_url: sourceUrl
         };
     }
@@ -284,64 +303,35 @@ export default async function handler(req, res) {
         if (url.includes('.m3u8')) return 'm3u8';
         if (url.includes('.mp4')) return 'mp4';
         if (url.includes('.webm')) return 'webm';
-        if (url.includes('.flv')) return 'flv';
         return 'video';
     }
     
-    // Helper: Get M3U8 Stream
-    async function getM3U8Stream(chapterId) {
-        const chapterDetail = await scrapeChapterDetail(chapterId);
-        
-        if (!chapterDetail || !chapterDetail.sources.length) {
-            return { id: chapterId, stream_url: null, error: 'Stream not found' };
-        }
-        
-        // Prioritas: m3u8 > mp4 > video > iframe
-        const priority = ['m3u8', 'mp4', 'webm', 'video', 'iframe'];
-        
-        for (const type of priority) {
-            const source = chapterDetail.sources.find(s => s.type === type);
-            if (source) {
-                return {
-                    id: chapterId,
-                    stream_url: source.url,
-                    type: source.type,
-                    quality: source.quality
-                };
-            }
-        }
-        
-        // Fallback: return first source
-        return {
-            id: chapterId,
-            stream_url: chapterDetail.sources[0].url,
-            type: chapterDetail.sources[0].type,
-            quality: chapterDetail.sources[0].quality
-        };
-    }
-    
-    // Parse URL
-    const { url } = req;
+    // Parse URL and query params
+    const { url, query } = req;
     const urlParts = url.split('?')[0].split('/').filter(Boolean);
     
     try {
         // Route: GET /
-        if (url === '/' || url === '') {
+        if (url === '/' || url === '' || urlParts.length === 0) {
             return res.status(200).json({
                 service: 'GoodShort API',
-                version: '3.0',
+                version: '4.0',
                 endpoints: {
                     'GET /nav': 'Navigation menu',
-                    'GET /home': 'Get all dramas with URLs',
-                    'GET /search?q={query}': 'Search dramas',
-                    'GET /hot': 'Trending dramas',
-                    'GET /book/{url}': 'Drama detail - Use raw_href from /home',
-                    'GET /chapters/{url}': 'Chapters list',
-                    'GET /play/{url}': 'Play chapter',
-                    'GET /m3u8/{url}': 'Get stream URL'
+                    'GET /home?lang={lang}': 'Get dramas (default lang=id)',
+                    'GET /search?q={query}&lang={lang}': 'Search dramas',
+                    'GET /hot?lang={lang}': 'Trending dramas',
+                    'GET /book/{id}?lang={lang}': 'Drama detail by ID',
+                    'GET /chapters/{id}?lang={lang}': 'Get chapters by drama ID',
+                    'GET /play/{chapterId}?lang={lang}': 'Play chapter',
+                    'GET /m3u8/{chapterId}?lang={lang}': 'Get stream URL'
                 },
-                usage: 'Use "raw_href" or "url" from /home response as parameter',
-                example: '/book/id/drama/31001241758 or /book/31001241758'
+                usage: {
+                    lang: 'Language code (id, en, etc)',
+                    id: 'Drama ID number (e.g., 31001241758)',
+                    chapterId: 'Chapter/Episode ID'
+                },
+                example: 'GET /book/31001241758?lang=id'
             });
         }
         
@@ -359,9 +349,11 @@ export default async function handler(req, res) {
         
         // Route: GET /home
         if (urlParts[0] === 'home') {
-            const dramas = await scrapeHome();
+            const lang = query.lang || 'id';
+            const dramas = await scrapeHome(lang);
             return res.status(200).json({
                 status: 'success',
+                lang: lang,
                 total: dramas.length,
                 data: dramas
             });
@@ -369,22 +361,25 @@ export default async function handler(req, res) {
         
         // Route: GET /search
         if (urlParts[0] === 'search') {
-            const query = req.query.q || '';
-            if (!query) {
+            const q = query.q || '';
+            const lang = query.lang || 'id';
+            
+            if (!q) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Query parameter "q" required'
                 });
             }
             
-            const allDramas = await scrapeHome();
+            const allDramas = await scrapeHome(lang);
             const results = allDramas.filter(d => 
-                d.title.toLowerCase().includes(query.toLowerCase())
+                d.title.toLowerCase().includes(q.toLowerCase())
             );
             
             return res.status(200).json({
                 status: 'success',
-                query,
+                query: q,
+                lang: lang,
                 total: results.length,
                 data: results
             });
@@ -392,25 +387,29 @@ export default async function handler(req, res) {
         
         // Route: GET /hot
         if (urlParts[0] === 'hot') {
-            const dramas = await scrapeHome();
+            const lang = query.lang || 'id';
+            const dramas = await scrapeHome(lang);
             return res.status(200).json({
                 status: 'success',
+                lang: lang,
                 total: dramas.slice(0, 10).length,
                 data: dramas.slice(0, 10)
             });
         }
         
-        // Route: GET /book/*
-        if (urlParts[0] === 'book' && urlParts.length > 1) {
-            // Ambil semua path setelah /book/
-            const bookPath = url.split('/book/')[1].split('?')[0];
-            const bookDetail = await scrapeBookDetail(bookPath);
+        // Route: GET /book/:id
+        if (urlParts[0] === 'book' && urlParts[1]) {
+            const id = urlParts[1];
+            const lang = query.lang || 'id';
+            
+            const bookDetail = await scrapeBookDetail(id, lang);
             
             if (!bookDetail) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'Book not found',
-                    tried_path: bookPath
+                    id: id,
+                    lang: lang
                 });
             }
             
@@ -420,10 +419,12 @@ export default async function handler(req, res) {
             });
         }
         
-        // Route: GET /chapters/*
-        if (urlParts[0] === 'chapters' && urlParts.length > 1) {
-            const bookPath = url.split('/chapters/')[1].split('?')[0];
-            const bookDetail = await scrapeBookDetail(bookPath);
+        // Route: GET /chapters/:id
+        if (urlParts[0] === 'chapters' && urlParts[1]) {
+            const id = urlParts[1];
+            const lang = query.lang || 'id';
+            
+            const bookDetail = await scrapeBookDetail(id, lang);
             
             if (!bookDetail) {
                 return res.status(404).json({
@@ -434,21 +435,27 @@ export default async function handler(req, res) {
             
             return res.status(200).json({
                 status: 'success',
+                book_id: id,
                 book_title: bookDetail.title,
+                lang: lang,
                 total: bookDetail.chapters.length,
                 data: bookDetail.chapters
             });
         }
         
-        // Route: GET /play/*
-        if (urlParts[0] === 'play' && urlParts.length > 1) {
-            const chapterPath = url.split('/play/')[1].split('?')[0];
-            const chapterDetail = await scrapeChapterDetail(chapterPath);
+        // Route: GET /play/:chapterId
+        if (urlParts[0] === 'play' && urlParts[1]) {
+            const chapterId = urlParts[1];
+            const lang = query.lang || 'id';
+            
+            const chapterDetail = await scrapeChapterDetail(chapterId, lang);
             
             if (!chapterDetail) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Chapter not found'
+                    message: 'Chapter not found',
+                    chapter_id: chapterId,
+                    lang: lang
                 });
             }
             
@@ -458,21 +465,33 @@ export default async function handler(req, res) {
             });
         }
         
-        // Route: GET /m3u8/*
-        if (urlParts[0] === 'm3u8' && urlParts.length > 1) {
-            const chapterPath = url.split('/m3u8/')[1].split('?')[0];
-            const streamData = await getM3U8Stream(chapterPath);
+        // Route: GET /m3u8/:chapterId
+        if (urlParts[0] === 'm3u8' && urlParts[1]) {
+            const chapterId = urlParts[1];
+            const lang = query.lang || 'id';
             
-            if (streamData.error) {
+            const chapterDetail = await scrapeChapterDetail(chapterId, lang);
+            
+            if (!chapterDetail || chapterDetail.sources.length === 0) {
                 return res.status(404).json({
                     status: 'error',
-                    message: streamData.error
+                    message: 'Stream not found'
                 });
             }
             
+            // Prioritize m3u8
+            const m3u8 = chapterDetail.sources.find(s => s.type === 'm3u8');
+            const stream = m3u8 || chapterDetail.sources[0];
+            
             return res.status(200).json({
                 status: 'success',
-                data: streamData
+                data: {
+                    id: chapterId,
+                    stream_url: stream.url,
+                    type: stream.type,
+                    quality: stream.quality,
+                    all_sources: chapterDetail.sources
+                }
             });
         }
         
@@ -486,8 +505,7 @@ export default async function handler(req, res) {
         console.error('Server error:', error);
         return res.status(500).json({
             status: 'error',
-            message: error.message,
-            stack: error.stack
+            message: error.message
         });
     }
 }
