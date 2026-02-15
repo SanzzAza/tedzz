@@ -1,530 +1,379 @@
-from flask import Flask, request, jsonify
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 import requests
-import re
 import json
-import time
+import re
 
-app = Flask(__name__)
-
-# Config
 BASE_URL = 'https://www.goodshort.com'
 
-# Headers untuk request
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Cache-Control': 'max-age=0',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
 }
 
-def fetch_page(url, session=None):
-    """Fetch page dengan retry mechanism"""
-    if session is None:
-        session = requests.Session()
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            print(f"[Attempt {attempt + 1}] Fetching: {url}")
-            response = session.get(url, headers=HEADERS, timeout=15)
-            
-            if response.status_code == 200:
-                print(f"✓ Success: {len(response.text)} chars")
-                return response.text
-            elif response.status_code == 404:
-                print(f"✗ 404 Not Found")
-                return None
-            else:
-                print(f"✗ Status: {response.status_code}")
-                
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-                continue
-    
-    return None
+def fetch_page(url):
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        if response.status_code == 200:
+            return response.text
+        return None
+    except:
+        return None
 
 def scrape_home(lang='id'):
-    """Scrape home page"""
-    url = f"{BASE_URL}/{lang}"
-    html = fetch_page(url)
-    
+    html = fetch_page(f"{BASE_URL}/{lang}")
     if not html:
         return []
     
     soup = BeautifulSoup(html, 'lxml')
     dramas = []
-    seen_ids = set()
+    seen = set()
     
-    # Cari semua link
     for link in soup.find_all('a', href=True):
-        href = link.get('href')
-        
-        # Extract ID (minimal 10 digit)
+        href = link['href']
         id_match = re.search(r'/(\d{10,})', href)
-        if not id_match:
+        
+        if not id_match or id_match.group(1) in seen:
             continue
         
-        drama_id = id_match.group(1)
-        
-        if drama_id in seen_ids:
-            continue
-        
-        # Harus ada gambar
         img = link.find('img')
         if not img:
             continue
         
-        seen_ids.add(drama_id)
-        
-        title = (link.get('title') or 
-                img.get('alt') or 
-                link.get_text(strip=True) or 
-                'No Title')
-        
-        thumbnail = img.get('src') or img.get('data-src') or ''
-        if thumbnail and not thumbnail.startswith('http'):
-            thumbnail = BASE_URL + thumbnail
+        drama_id = id_match.group(1)
+        seen.add(drama_id)
         
         dramas.append({
             'id': drama_id,
-            'title': title[:200],
+            'title': (link.get('title') or img.get('alt') or 'No Title')[:200],
             'url': href if href.startswith('http') else f"{BASE_URL}{href}",
-            'thumbnail': thumbnail,
+            'thumbnail': (img.get('src') or img.get('data-src') or ''),
             'lang': lang
         })
     
-    print(f"✓ Scraped {len(dramas)} dramas")
     return dramas
 
-def scrape_book_detail(book_id, lang='id'):
-    """Scrape book detail"""
-    url_patterns = [
+def scrape_book(book_id, lang='id'):
+    patterns = [
         f"{BASE_URL}/{lang}/{book_id}",
         f"{BASE_URL}/{book_id}",
         f"{BASE_URL}/{lang}/drama/{book_id}",
-        f"{BASE_URL}/drama/{book_id}",
+        f"{BASE_URL}/drama/{book_id}"
     ]
     
-    session = requests.Session()
     html = None
-    working_url = None
-    
-    for url in url_patterns:
-        html = fetch_page(url, session)
+    for url in patterns:
+        html = fetch_page(url)
         if html and len(html) > 5000:
-            working_url = url
-            print(f"✓ Book found: {url}")
             break
     
     if not html:
-        print(f"✗ Book {book_id} not found")
-        return None
-    
-    soup = BeautifulSoup(html, 'lxml')
-    
-    # Extract title
-    title = ''
-    for selector in [soup.find('h1'), soup.find('h2'), soup.find('meta', property='og:title')]:
-        if selector:
-            title = selector.get('content') if selector.name == 'meta' else selector.get_text(strip=True)
-            if title:
-                break
-    
-    if not title or len(title) < 2:
-        return None
-    
-    # Description
-    description = ''
-    desc_meta = soup.find('meta', property='og:description')
-    if desc_meta:
-        description = desc_meta.get('content', '')
-    else:
-        for elem in soup.select('[class*="intro"], [class*="desc"], [class*="summary"]'):
-            description = elem.get_text(strip=True)
-            if description:
-                break
-    
-    # Thumbnail
-    thumbnail = ''
-    thumb_meta = soup.find('meta', property='og:image')
-    if thumb_meta:
-        thumbnail = thumb_meta.get('content', '')
-    else:
-        for selector in ['img[class*="cover"]', 'img[class*="poster"]', 'img']:
-            img = soup.select_one(selector)
-            if img:
-                thumbnail = img.get('src', '')
-                break
-    
-    if thumbnail and not thumbnail.startswith('http'):
-        thumbnail = BASE_URL + thumbnail
-    
-    # Tags
-    tags = []
-    for elem in soup.select('[class*="tag"], [class*="label"], [class*="genre"]'):
-        tag = elem.get_text(strip=True)
-        if tag and 1 < len(tag) < 50 and tag not in tags:
-            tags.append(tag)
-    
-    # Chapters
-    chapters = []
-    seen_chapter_ids = set()
-    
-    for link in soup.find_all('a', href=True):
-        href = link.get('href')
-        text = link.get_text(strip=True)
-        
-        # Filter episode
-        if not (re.search(r'episode|ep\.?\s*\d+|part\s*\d+|chapter\s*\d+', text, re.I) or
-               re.search(r'episode|ep-|chapter|watch', href, re.I)):
-            continue
-        
-        # Extract chapter ID
-        chapter_id_match = re.search(r'/(\d{10,})', href)
-        if not chapter_id_match:
-            continue
-        
-        chapter_id = chapter_id_match.group(1)
-        
-        # Skip jika duplicate atau sama dengan book ID
-        if chapter_id == book_id or chapter_id in seen_chapter_ids:
-            continue
-        
-        seen_chapter_ids.add(chapter_id)
-        
-        # Episode number
-        num_match = re.search(r'\d+', text)
-        episode_num = int(num_match.group(0)) if num_match else len(chapters) + 1
-        
-        full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
-        
-        chapters.append({
-            'id': chapter_id,
-            'chapter_number': episode_num,
-            'title': text or f"Episode {episode_num}",
-            'url': full_url,
-            'lang': lang
-        })
-    
-    # Sort
-    chapters.sort(key=lambda x: x['chapter_number'])
-    
-    print(f"✓ Found {len(chapters)} chapters")
-    
-    return {
-        'id': book_id,
-        'lang': lang,
-        'title': title,
-        'description': description,
-        'thumbnail': thumbnail,
-        'tags': tags,
-        'total_chapters': len(chapters),
-        'chapters': chapters,
-        'source_url': working_url
-    }
-
-def scrape_chapter(chapter_id, lang='id'):
-    """Scrape chapter detail"""
-    url_patterns = [
-        f"{BASE_URL}/{lang}/{chapter_id}",
-        f"{BASE_URL}/{chapter_id}",
-        f"{BASE_URL}/{lang}/episode/{chapter_id}",
-        f"{BASE_URL}/episode/{chapter_id}",
-        f"{BASE_URL}/{lang}/watch/{chapter_id}",
-        f"{BASE_URL}/watch/{chapter_id}",
-    ]
-    
-    session = requests.Session()
-    html = None
-    working_url = None
-    
-    for url in url_patterns:
-        html = fetch_page(url, session)
-        if html and len(html) > 3000:
-            working_url = url
-            print(f"✓ Chapter found: {url}")
-            break
-    
-    if not html:
-        print(f"✗ Chapter {chapter_id} not found")
         return None
     
     soup = BeautifulSoup(html, 'lxml')
     
     # Title
     title = ''
-    for selector in [soup.find('h1'), soup.find('h2'), soup.find('title')]:
-        if selector:
-            title = selector.get_text(strip=True)
-            if title:
-                break
+    h1 = soup.find('h1')
+    if h1:
+        title = h1.get_text(strip=True)
     
     if not title:
-        title = f"Episode {chapter_id}"
+        meta = soup.find('meta', property='og:title')
+        if meta:
+            title = meta.get('content', '')
+    
+    if not title or len(title) < 2:
+        return None
+    
+    # Description
+    desc = ''
+    meta_desc = soup.find('meta', property='og:description')
+    if meta_desc:
+        desc = meta_desc.get('content', '')
+    
+    # Thumbnail
+    thumb = ''
+    meta_img = soup.find('meta', property='og:image')
+    if meta_img:
+        thumb = meta_img.get('content', '')
+    
+    # Tags
+    tags = []
+    for elem in soup.select('[class*="tag"], [class*="label"]'):
+        tag = elem.get_text(strip=True)
+        if tag and len(tag) < 50:
+            tags.append(tag)
+    
+    # Chapters
+    chapters = []
+    seen_ch = set()
+    
+    for link in soup.find_all('a', href=True):
+        href = link['href']
+        text = link.get_text(strip=True)
+        
+        if not re.search(r'episode|ep|part|chapter', text + href, re.I):
+            continue
+        
+        ch_match = re.search(r'/(\d{10,})', href)
+        if not ch_match:
+            continue
+        
+        ch_id = ch_match.group(1)
+        if ch_id == book_id or ch_id in seen_ch:
+            continue
+        
+        seen_ch.add(ch_id)
+        
+        num_match = re.search(r'\d+', text)
+        num = int(num_match.group(0)) if num_match else len(chapters) + 1
+        
+        chapters.append({
+            'id': ch_id,
+            'chapter_number': num,
+            'title': text or f"Episode {num}",
+            'url': href if href.startswith('http') else f"{BASE_URL}{href}"
+        })
+    
+    chapters.sort(key=lambda x: x['chapter_number'])
+    
+    return {
+        'id': book_id,
+        'title': title,
+        'description': desc,
+        'thumbnail': thumb,
+        'tags': tags,
+        'total_chapters': len(chapters),
+        'chapters': chapters
+    }
+
+def scrape_chapter(ch_id, lang='id'):
+    patterns = [
+        f"{BASE_URL}/{lang}/{ch_id}",
+        f"{BASE_URL}/{ch_id}",
+        f"{BASE_URL}/{lang}/episode/{ch_id}",
+        f"{BASE_URL}/episode/{ch_id}"
+    ]
+    
+    html = None
+    for url in patterns:
+        html = fetch_page(url)
+        if html and len(html) > 3000:
+            break
+    
+    if not html:
+        return None
+    
+    soup = BeautifulSoup(html, 'lxml')
+    
+    title = ''
+    h1 = soup.find('h1')
+    if h1:
+        title = h1.get_text(strip=True)
+    else:
+        title = f"Episode {ch_id}"
     
     sources = []
-    seen_urls = set()
+    seen = set()
     
     # Video tags
     for video in soup.find_all('video'):
         src = video.get('src')
-        if src and src not in seen_urls:
-            seen_urls.add(src)
-            full_url = src if src.startswith('http') else f"{BASE_URL}{src}"
+        if src and src not in seen:
+            seen.add(src)
             sources.append({
                 'type': 'video',
-                'quality': video.get('quality', 'auto'),
-                'url': full_url
-            })
-        
-        for source in video.find_all('source'):
-            src = source.get('src')
-            if src and src not in seen_urls:
-                seen_urls.add(src)
-                full_url = src if src.startswith('http') else f"{BASE_URL}{src}"
-                quality = source.get('label') or source.get('res') or 'auto'
-                sources.append({
-                    'type': 'video',
-                    'quality': quality,
-                    'url': full_url
-                })
-    
-    # Iframes
-    for iframe in soup.find_all('iframe'):
-        src = iframe.get('src')
-        if src and src not in seen_urls:
-            seen_urls.add(src)
-            full_url = src if src.startswith('http') else f"{BASE_URL}{src}"
-            sources.append({
-                'type': 'iframe',
                 'quality': 'auto',
-                'url': full_url
+                'url': src if src.startswith('http') else f"{BASE_URL}{src}"
             })
     
-    # Extract dari scripts
+    # Scripts
     scripts = soup.find_all('script')
-    all_scripts = '\n'.join([s.string for s in scripts if s.string])
+    all_text = '\n'.join([s.string for s in scripts if s.string])
     
-    video_patterns = [
-        (r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', 'm3u8'),
-        (r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', 'mp4'),
-        (r'(https?://[^\s"\'<>]+\.webm[^\s"\'<>]*)', 'webm'),
-        (r'"file"\s*:\s*"([^"]+)"', 'auto'),
-        (r'"source"\s*:\s*"([^"]+)"', 'auto'),
-        (r'"url"\s*:\s*"([^"]+)"', 'auto'),
-        (r'videoUrl\s*[:=]\s*["\']([^"\']+)["\']', 'auto'),
-        (r'src:\s*["\']([^"\']+)["\']', 'auto'),
-    ]
+    for match in re.finditer(r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', all_text, re.I):
+        url = match.group(1)
+        if url not in seen:
+            seen.add(url)
+            sources.append({'type': 'm3u8', 'quality': 'auto', 'url': url})
     
-    for pattern, vid_type in video_patterns:
-        matches = re.findall(pattern, all_scripts, re.I)
-        for match in matches:
-            url = match.strip()
-            
-            if not url.startswith('http'):
-                continue
-            
-            if url in seen_urls:
-                continue
-            
-            seen_urls.add(url)
-            
-            # Detect type
-            if vid_type == 'auto':
-                if '.m3u8' in url:
-                    final_type = 'm3u8'
-                elif '.mp4' in url:
-                    final_type = 'mp4'
-                elif '.webm' in url:
-                    final_type = 'webm'
-                else:
-                    final_type = 'video'
-            else:
-                final_type = vid_type
-            
-            sources.append({
-                'type': final_type,
-                'quality': 'auto',
-                'url': url
-            })
-    
-    print(f"✓ Found {len(sources)} sources")
+    for match in re.finditer(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', all_text, re.I):
+        url = match.group(1)
+        if url not in seen:
+            seen.add(url)
+            sources.append({'type': 'mp4', 'quality': 'auto', 'url': url})
     
     return {
-        'id': chapter_id,
-        'lang': lang,
+        'id': ch_id,
         'title': title,
         'total_sources': len(sources),
-        'sources': sources,
-        'source_url': working_url
+        'sources': sources
     }
 
-# Routes
-@app.route('/')
-def index():
-    return jsonify({
-        'service': 'GoodShort Scraper API',
-        'version': '13.0',
-        'status': 'online',
-        'type': 'BeautifulSoup + Requests',
-        'endpoints': {
-            'GET /nav': 'Navigation',
-            'GET /home?lang=id': 'Home dramas',
-            'GET /search?q=keyword&lang=id': 'Search',
-            'GET /hot?lang=id': 'Hot dramas',
-            'GET /book/<id>?lang=id': 'Book detail',
-            'GET /chapters/<id>?lang=id': 'Chapters',
-            'GET /play/<id>?lang=id': 'Chapter sources',
-            'GET /m3u8/<id>?lang=id': 'Best stream'
-        }
-    })
-
-@app.route('/nav')
-def nav():
-    return jsonify({
-        'status': 'success',
-        'data': [
-            {'id': 'home', 'title': 'Home', 'path': '/home'},
-            {'id': 'hot', 'title': 'Hot', 'path': '/hot'},
-            {'id': 'search', 'title': 'Search', 'path': '/search'}
-        ]
-    })
-
-@app.route('/home')
-def home():
-    lang = request.args.get('lang', 'id')
-    try:
-        dramas = scrape_home(lang)
-        return jsonify({
-            'status': 'success',
-            'lang': lang,
-            'total': len(dramas),
-            'data': dramas
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/search')
-def search():
-    q = request.args.get('q', '')
-    lang = request.args.get('lang', 'id')
-    
-    if not q:
-        return jsonify({'status': 'error', 'message': 'Query required'}), 400
-    
-    try:
-        all_dramas = scrape_home(lang)
-        results = [d for d in all_dramas if q.lower() in d['title'].lower()]
-        return jsonify({
-            'status': 'success',
-            'query': q,
-            'total': len(results),
-            'data': results
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/hot')
-def hot():
-    lang = request.args.get('lang', 'id')
-    try:
-        dramas = scrape_home(lang)[:10]
-        return jsonify({
-            'status': 'success',
-            'lang': lang,
-            'total': len(dramas),
-            'data': dramas
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/book/<book_id>')
-def book_detail(book_id):
-    lang = request.args.get('lang', 'id')
-    try:
-        book = scrape_book_detail(book_id, lang)
-        if not book:
-            return jsonify({
-                'status': 'error',
-                'message': 'Book not found',
-                'book_id': book_id
-            }), 404
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
         
-        return jsonify({'status': 'success', 'data': book})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/chapters/<book_id>')
-def chapters(book_id):
-    lang = request.args.get('lang', 'id')
-    try:
-        book = scrape_book_detail(book_id, lang)
-        if not book:
-            return jsonify({'status': 'error', 'message': 'Book not found'}), 404
+        lang = params.get('lang', ['id'])[0]
+        q = params.get('q', [''])[0]
         
-        return jsonify({
-            'status': 'success',
-            'book_id': book_id,
-            'book_title': book['title'],
-            'total': len(book['chapters']),
-            'data': book['chapters']
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/play/<chapter_id>')
-def play(chapter_id):
-    lang = request.args.get('lang', 'id')
-    try:
-        chapter = scrape_chapter(chapter_id, lang)
-        if not chapter:
-            return jsonify({
-                'status': 'error',
-                'message': 'Chapter not found'
-            }), 404
+        parts = [p for p in path.split('/') if p]
         
-        return jsonify({'status': 'success', 'data': chapter})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/m3u8/<chapter_id>')
-def m3u8(chapter_id):
-    lang = request.args.get('lang', 'id')
-    try:
-        chapter = scrape_chapter(chapter_id, lang)
-        if not chapter or not chapter['sources']:
-            return jsonify({'status': 'error', 'message': 'No sources'}), 404
+        try:
+            # Root
+            if not parts:
+                response = {
+                    'service': 'GoodShort API',
+                    'version': '14.0',
+                    'status': 'online',
+                    'endpoints': {
+                        'GET /nav': 'Nav',
+                        'GET /home?lang=id': 'Home',
+                        'GET /search?q=x&lang=id': 'Search',
+                        'GET /hot?lang=id': 'Hot',
+                        'GET /book/{id}?lang=id': 'Book',
+                        'GET /chapters/{id}?lang=id': 'Chapters',
+                        'GET /play/{id}?lang=id': 'Play',
+                        'GET /m3u8/{id}?lang=id': 'M3U8'
+                    }
+                }
+            
+            # Nav
+            elif parts[0] == 'nav':
+                response = {
+                    'status': 'success',
+                    'data': [
+                        {'id': 'home', 'title': 'Home', 'path': '/home'},
+                        {'id': 'hot', 'title': 'Hot', 'path': '/hot'},
+                        {'id': 'search', 'title': 'Search', 'path': '/search'}
+                    ]
+                }
+            
+            # Home
+            elif parts[0] == 'home':
+                dramas = scrape_home(lang)
+                response = {
+                    'status': 'success',
+                    'lang': lang,
+                    'total': len(dramas),
+                    'data': dramas
+                }
+            
+            # Search
+            elif parts[0] == 'search':
+                if not q:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Query required'}).encode())
+                    return
+                
+                all_dramas = scrape_home(lang)
+                results = [d for d in all_dramas if q.lower() in d['title'].lower()]
+                response = {
+                    'status': 'success',
+                    'query': q,
+                    'total': len(results),
+                    'data': results
+                }
+            
+            # Hot
+            elif parts[0] == 'hot':
+                dramas = scrape_home(lang)[:10]
+                response = {
+                    'status': 'success',
+                    'total': len(dramas),
+                    'data': dramas
+                }
+            
+            # Book
+            elif parts[0] == 'book' and len(parts) > 1:
+                book = scrape_book(parts[1], lang)
+                if not book:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
+                    return
+                
+                response = {'status': 'success', 'data': book}
+            
+            # Chapters
+            elif parts[0] == 'chapters' and len(parts) > 1:
+                book = scrape_book(parts[1], lang)
+                if not book:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
+                    return
+                
+                response = {
+                    'status': 'success',
+                    'book_id': parts[1],
+                    'book_title': book['title'],
+                    'total': len(book['chapters']),
+                    'data': book['chapters']
+                }
+            
+            # Play
+            elif parts[0] == 'play' and len(parts) > 1:
+                chapter = scrape_chapter(parts[1], lang)
+                if not chapter:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
+                    return
+                
+                response = {'status': 'success', 'data': chapter}
+            
+            # M3U8
+            elif parts[0] == 'm3u8' and len(parts) > 1:
+                chapter = scrape_chapter(parts[1], lang)
+                if not chapter or not chapter['sources']:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'error', 'message': 'No sources'}).encode())
+                    return
+                
+                best = chapter['sources'][0]
+                for s in chapter['sources']:
+                    if s['type'] == 'm3u8':
+                        best = s
+                        break
+                
+                response = {
+                    'status': 'success',
+                    'data': {
+                        'id': parts[1],
+                        'stream_url': best['url'],
+                        'type': best['type'],
+                        'all_sources': chapter['sources']
+                    }
+                }
+            
+            else:
+                self.send_response(404)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'error', 'message': 'Not found'}).encode())
+                return
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode())
         
-        # Priority
-        priorities = ['m3u8', 'mp4', 'video']
-        best = chapter['sources'][0]
-        
-        for p in priorities:
-            found = next((s for s in chapter['sources'] if s['type'] == p), None)
-            if found:
-                best = found
-                break
-        
-        return jsonify({
-            'status': 'success',
-            'data': {
-                'id': chapter_id,
-                'stream_url': best['url'],
-                'type': best['type'],
-                'quality': best['quality'],
-                'all_sources': chapter['sources']
-            }
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-# Vercel handler
-def handler(request):
-    with app.request_context(request.environ):
-        return app.full_dispatch_request()
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'error', 'message': str(e)}).encode())
