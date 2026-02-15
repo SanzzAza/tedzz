@@ -31,35 +31,80 @@ export default async function handler(req, res) {
             const dramas = [];
             const seenUrls = new Set();
             
-            $('div, article, li, section').each((i, container) => {
-                const $container = $(container);
-                const $img = $container.find('img').first();
-                const $link = $container.find('a[href]').first();
-                const $title = $container.find('h1, h2, h3, h4, h5, span, p').first();
+            // Cari semua link drama
+            $('a[href*="/drama/"], a[href*="/series/"], a[href*="/video/"]').each((i, elem) => {
+                const $link = $(elem);
+                const href = $link.attr('href') || '';
+                const $img = $link.find('img').first();
+                const title = $link.find('h2, h3, h4, span, p').first().text().trim() || 
+                             $link.attr('title') || 
+                             $img.attr('alt') || 
+                             $link.text().trim();
                 
-                if ($img.length && $link.length) {
-                    const title = $title.text().trim() || $img.attr('alt') || 'No Title';
-                    let url = $link.attr('href') || '';
+                if (href && !seenUrls.has(href)) {
+                    seenUrls.add(href);
                     
-                    if (url && !url.startsWith('http')) {
-                        url = `${baseUrl}${url}`;
+                    // Extract ID dari URL (ambil path terakhir)
+                    let id = '';
+                    const urlParts = href.split('/').filter(Boolean);
+                    if (urlParts.length > 0) {
+                        id = urlParts[urlParts.length - 1];
+                        // Hapus query parameters jika ada
+                        id = id.split('?')[0];
                     }
                     
-                    const idMatch = url.match(/\/(\d+)(?:\/|$)/);
-                    const id = idMatch ? idMatch[1] : Math.random().toString(36).substr(2, 9);
+                    const fullUrl = href.startsWith('http') ? href : `${baseUrl}${href}`;
+                    const thumbnail = $img.attr('src') || $img.attr('data-src') || '';
                     
-                    if (url && title && title.length > 2 && !seenUrls.has(url)) {
-                        seenUrls.add(url);
+                    if (id && title && title.length > 2) {
                         dramas.push({
                             id: id,
                             title: title,
-                            url: url,
-                            thumbnail: $img.attr('src') || '',
+                            url: fullUrl,
+                            thumbnail: thumbnail.startsWith('http') ? thumbnail : `${baseUrl}${thumbnail}`,
                             type: 'drama'
                         });
                     }
                 }
             });
+            
+            // Jika tidak ada drama ditemukan dengan selector spesifik, coba cara umum
+            if (dramas.length === 0) {
+                $('div[class*="item"], div[class*="card"], article').each((i, container) => {
+                    const $container = $(container);
+                    const $link = $container.find('a[href]').first();
+                    const $img = $container.find('img').first();
+                    const title = $container.find('h2, h3, h4, span').first().text().trim() || 
+                                 $img.attr('alt') || '';
+                    
+                    if ($link.length && title) {
+                        const href = $link.attr('href') || '';
+                        
+                        if (!seenUrls.has(href)) {
+                            seenUrls.add(href);
+                            
+                            let id = '';
+                            const urlParts = href.split('/').filter(Boolean);
+                            if (urlParts.length > 0) {
+                                id = urlParts[urlParts.length - 1].split('?')[0];
+                            }
+                            
+                            const fullUrl = href.startsWith('http') ? href : `${baseUrl}${href}`;
+                            const thumbnail = $img.attr('src') || $img.attr('data-src') || '';
+                            
+                            if (id && title.length > 2) {
+                                dramas.push({
+                                    id: id,
+                                    title: title,
+                                    url: fullUrl,
+                                    thumbnail: thumbnail.startsWith('http') ? thumbnail : `${baseUrl}${thumbnail}`,
+                                    type: 'drama'
+                                });
+                            }
+                        }
+                    }
+                });
+            }
             
             return dramas;
         } catch (error) {
@@ -71,126 +116,244 @@ export default async function handler(req, res) {
     // Helper function: Scrape Book Detail
     async function scrapeBookDetail(bookId) {
         const baseUrl = 'https://www.goodshort.com';
-        const targetUrl = `${baseUrl}/id/drama/${bookId}`;
+        
+        // Coba beberapa kemungkinan URL pattern
+        const possibleUrls = [
+            `${baseUrl}/id/drama/${bookId}`,
+            `${baseUrl}/drama/${bookId}`,
+            `${baseUrl}/id/series/${bookId}`,
+            `${baseUrl}/series/${bookId}`,
+            `${baseUrl}/id/video/${bookId}`,
+            `${baseUrl}/video/${bookId}`,
+            `${baseUrl}/id/${bookId}`,
+            `${baseUrl}/${bookId}`
+        ];
         
         const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8'
         };
         
-        try {
-            const response = await axios.get(targetUrl, { headers, timeout: 15000 });
-            const $ = cheerio.load(response.data);
-            
-            const title = $('h1, h2').first().text().trim() || 'Unknown';
-            
-            let description = '';
-            $('p, div').each((i, elem) => {
-                const classes = $(elem).attr('class') || '';
-                if (classes.toLowerCase().includes('desc') || 
-                    classes.toLowerCase().includes('summary')) {
-                    description = $(elem).text().trim();
-                    return false;
-                }
-            });
-            
-            const thumbnail = $('img').first().attr('src') || '';
-            
-            const chapters = [];
-            $('a[href]').each((i, elem) => {
-                const href = $(elem).attr('href') || '';
-                const text = $(elem).text().trim();
+        for (const targetUrl of possibleUrls) {
+            try {
+                const response = await axios.get(targetUrl, { 
+                    headers, 
+                    timeout: 15000,
+                    validateStatus: function (status) {
+                        return status < 500; // Accept anything less than 500
+                    }
+                });
                 
-                if (text.toLowerCase().includes('episode') || 
-                    text.toLowerCase().includes('ep') || 
-                    href.toLowerCase().includes('episode')) {
-                    
-                    const chapterIdMatch = href.match(/\/(\d+)(?:\/|$)/);
-                    const chapterId = chapterIdMatch ? chapterIdMatch[1] : `${bookId}_${chapters.length + 1}`;
-                    
-                    chapters.push({
-                        id: chapterId,
-                        chapter_number: chapters.length + 1,
-                        title: text,
-                        url: href.startsWith('http') ? href : `${baseUrl}${href}`
-                    });
+                // Skip jika 404
+                if (response.status === 404) continue;
+                
+                const $ = cheerio.load(response.data);
+                
+                const title = $('h1').first().text().trim() || 
+                             $('h2').first().text().trim() || 
+                             $('meta[property="og:title"]').attr('content') || 
+                             'Unknown';
+                
+                // Skip jika tidak ada konten
+                if (title === 'Unknown' || title === '') continue;
+                
+                let description = '';
+                // Cari deskripsi dengan berbagai selector
+                const descSelectors = [
+                    'div[class*="desc"]',
+                    'div[class*="summary"]',
+                    'div[class*="synopsis"]',
+                    'p[class*="desc"]',
+                    'meta[property="og:description"]',
+                    'meta[name="description"]'
+                ];
+                
+                for (const selector of descSelectors) {
+                    if (selector.includes('meta')) {
+                        description = $(selector).attr('content') || '';
+                    } else {
+                        description = $(selector).first().text().trim();
+                    }
+                    if (description) break;
                 }
-            });
-            
-            return {
-                id: bookId,
-                title,
-                description,
-                thumbnail,
-                total_chapters: chapters.length,
-                chapters
-            };
-        } catch (error) {
-            console.error('Error scraping book detail:', error.message);
-            return null;
+                
+                const thumbnail = $('meta[property="og:image"]').attr('content') ||
+                                 $('img[class*="poster"]').first().attr('src') ||
+                                 $('img[class*="cover"]').first().attr('src') ||
+                                 $('img').first().attr('src') || '';
+                
+                const chapters = [];
+                let chapterIndex = 0;
+                
+                // Cari episode/chapter links
+                $('a').each((i, elem) => {
+                    const href = $(elem).attr('href') || '';
+                    const text = $(elem).text().trim();
+                    
+                    // Pattern untuk episode
+                    if (href.includes('episode') || href.includes('ep-') || 
+                        text.match(/episode\s*\d+/i) || text.match(/ep\s*\d+/i) ||
+                        text.match(/part\s*\d+/i) || text.match(/chapter\s*\d+/i)) {
+                        
+                        chapterIndex++;
+                        
+                        // Extract episode number dari text
+                        const numMatch = text.match(/\d+/);
+                        const episodeNum = numMatch ? parseInt(numMatch[0]) : chapterIndex;
+                        
+                        // Extract ID dari URL
+                        let chapterId = '';
+                        const urlParts = href.split('/').filter(Boolean);
+                        if (urlParts.length > 0) {
+                            chapterId = urlParts[urlParts.length - 1].split('?')[0];
+                        }
+                        
+                        if (!chapterId) {
+                            chapterId = `${bookId}_ep${episodeNum}`;
+                        }
+                        
+                        chapters.push({
+                            id: chapterId,
+                            chapter_number: episodeNum,
+                            title: text || `Episode ${episodeNum}`,
+                            url: href.startsWith('http') ? href : `${baseUrl}${href}`
+                        });
+                    }
+                });
+                
+                // Sort chapters berdasarkan episode number
+                chapters.sort((a, b) => a.chapter_number - b.chapter_number);
+                
+                return {
+                    id: bookId,
+                    title,
+                    description,
+                    thumbnail: thumbnail.startsWith('http') ? thumbnail : `${baseUrl}${thumbnail}`,
+                    total_chapters: chapters.length,
+                    chapters,
+                    source_url: targetUrl
+                };
+                
+            } catch (error) {
+                // Continue to next URL if error
+                continue;
+            }
         }
+        
+        return null;
     }
     
     // Helper function: Scrape Chapter Detail
     async function scrapeChapterDetail(chapterId) {
         const baseUrl = 'https://www.goodshort.com';
-        const targetUrl = `${baseUrl}/id/episode/${chapterId}`;
+        
+        const possibleUrls = [
+            `${baseUrl}/id/episode/${chapterId}`,
+            `${baseUrl}/episode/${chapterId}`,
+            `${baseUrl}/id/ep/${chapterId}`,
+            `${baseUrl}/ep/${chapterId}`,
+            `${baseUrl}/id/watch/${chapterId}`,
+            `${baseUrl}/watch/${chapterId}`,
+            `${baseUrl}/id/${chapterId}`,
+            `${baseUrl}/${chapterId}`
+        ];
         
         const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8'
         };
         
-        try {
-            const response = await axios.get(targetUrl, { headers, timeout: 15000 });
-            const $ = cheerio.load(response.data);
-            
-            const title = $('h1, h2').first().text().trim() || `Episode ${chapterId}`;
-            
-            const sources = [];
-            
-            $('video').each((i, video) => {
-                const src = $(video).attr('src');
-                if (src) {
-                    sources.push({ type: 'video', url: src });
-                }
-                
-                $(video).find('source').each((j, source) => {
-                    const sourceSrc = $(source).attr('src');
-                    if (sourceSrc) {
-                        sources.push({ type: 'video', url: sourceSrc });
+        for (const targetUrl of possibleUrls) {
+            try {
+                const response = await axios.get(targetUrl, { 
+                    headers, 
+                    timeout: 15000,
+                    validateStatus: function (status) {
+                        return status < 500;
                     }
                 });
-            });
-            
-            $('iframe').each((i, iframe) => {
-                const src = $(iframe).attr('src');
-                if (src) {
-                    sources.push({ type: 'iframe', url: src });
+                
+                if (response.status === 404) continue;
+                
+                const $ = cheerio.load(response.data);
+                
+                const title = $('h1').first().text().trim() || 
+                             $('h2').first().text().trim() || 
+                             `Episode ${chapterId}`;
+                
+                const sources = [];
+                
+                // Cari video sources
+                $('video').each((i, video) => {
+                    const src = $(video).attr('src');
+                    if (src) {
+                        sources.push({ type: 'video', url: src });
+                    }
+                    
+                    $(video).find('source').each((j, source) => {
+                        const sourceSrc = $(source).attr('src');
+                        if (sourceSrc) {
+                            sources.push({ type: 'video', url: sourceSrc });
+                        }
+                    });
+                });
+                
+                // Cari iframe
+                $('iframe').each((i, iframe) => {
+                    const src = $(iframe).attr('src');
+                    if (src) {
+                        sources.push({ type: 'iframe', url: src });
+                    }
+                });
+                
+                // Cari m3u8/mp4 dalam scripts
+                $('script').each((i, script) => {
+                    const scriptContent = $(script).html() || '';
+                    
+                    const videoPatterns = [
+                        /https?:\/\/[^\s"'>]+\.m3u8/g,
+                        /https?:\/\/[^\s"'>]+\.mp4/g,
+                        /https?:\/\/[^\s"'>]+\.webm/g,
+                        /"file":\s*"([^"]+)"/g,
+                        /"source":\s*"([^"]+)"/g,
+                        /"src":\s*"([^"]+)"/g
+                    ];
+                    
+                    videoPatterns.forEach(pattern => {
+                        const matches = scriptContent.match(pattern) || [];
+                        matches.forEach(match => {
+                            let url = match;
+                            // Clean up jika ada format "file": "url"
+                            if (match.includes('"')) {
+                                url = match.split('"').filter(s => s.includes('http'))[0] || match;
+                            }
+                            
+                            if (url.includes('.m3u8')) {
+                                sources.push({ type: 'm3u8', url });
+                            } else if (url.includes('.mp4')) {
+                                sources.push({ type: 'mp4', url });
+                            } else if (url.includes('.webm')) {
+                                sources.push({ type: 'webm', url });
+                            }
+                        });
+                    });
+                });
+                
+                if (sources.length > 0 || title !== `Episode ${chapterId}`) {
+                    return {
+                        id: chapterId,
+                        title,
+                        sources,
+                        source_url: targetUrl
+                    };
                 }
-            });
-            
-            $('script').each((i, script) => {
-                const scriptContent = $(script).html() || '';
                 
-                const m3u8Matches = scriptContent.match(/https?:\/\/[^\s"'>]+\.m3u8/g) || [];
-                m3u8Matches.forEach(url => {
-                    sources.push({ type: 'm3u8', url });
-                });
-                
-                const mp4Matches = scriptContent.match(/https?:\/\/[^\s"'>]+\.mp4/g) || [];
-                mp4Matches.forEach(url => {
-                    sources.push({ type: 'mp4', url });
-                });
-            });
-            
-            return {
-                id: chapterId,
-                title,
-                sources
-            };
-        } catch (error) {
-            console.error('Error scraping chapter detail:', error.message);
-            return null;
+            } catch (error) {
+                continue;
+            }
         }
+        
+        return null;
     }
     
     // Helper function: Get M3U8 Stream
@@ -242,17 +405,18 @@ export default async function handler(req, res) {
         if (url === '/' && req.method === 'GET') {
             return res.status(200).json({
                 service: 'GoodShort API',
-                version: '2.0',
+                version: '2.1',
                 endpoints: {
                     'GET /nav': 'Navigation menu',
-                    'GET /home': 'Home page dramas',
+                    'GET /home': 'Home page dramas - Get list with IDs',
                     'GET /search?q={query}': 'Search dramas',
                     'GET /hot': 'Trending/Hot dramas',
-                    'GET /book/{id}': 'Book/Drama detail',
+                    'GET /book/{id}': 'Book/Drama detail - Use ID from /home',
                     'GET /chapters/{id}': 'Get chapters list',
                     'GET /play/{chapterId}': 'Play chapter',
                     'GET /m3u8/{chapterId}': 'Get m3u8 stream URL'
-                }
+                },
+                note: 'First call /home to get drama IDs, then use those IDs for /book/{id}'
             });
         }
         
@@ -274,7 +438,8 @@ export default async function handler(req, res) {
             return res.status(200).json({
                 status: 'success',
                 total: dramas.length,
-                data: dramas
+                data: dramas,
+                note: 'Use the "id" field from each drama for /book/{id} endpoint'
             });
         }
         
@@ -317,7 +482,8 @@ export default async function handler(req, res) {
             if (!bookDetail) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Book not found'
+                    message: 'Book not found. Please use a valid ID from /home endpoint',
+                    tried_id: bookId
                 });
             }
             
@@ -342,6 +508,7 @@ export default async function handler(req, res) {
             return res.status(200).json({
                 status: 'success',
                 book_id: bookId,
+                book_title: bookDetail.title,
                 total: bookDetail.chapters.length,
                 data: bookDetail.chapters
             });
