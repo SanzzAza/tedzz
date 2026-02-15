@@ -10,35 +10,87 @@ export default async function handler(req, res) {
         return;
     }
     
-    // API DramaBos yang LU KASIH LIAT
     const DRAMABOS_API = 'https://goodshort.dramabos.my.id';
     
-    const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-        'Accept-Language': 'id-ID,id;q=0.9'
-    };
-    
-    // Helper: Call DramaBos API
-    async function callAPI(endpoint, params = {}) {
-        try {
-            console.log(`Calling: ${DRAMABOS_API}${endpoint}`);
-            
-            const response = await axios.get(`${DRAMABOS_API}${endpoint}`, {
-                headers,
-                params,
-                timeout: 20000
-            });
-            
-            return response.data;
-            
-        } catch (error) {
-            console.error('API Error:', error.message);
-            return null;
+    // Test direct API call dengan berbagai headers
+    async function testAPI(bookId, lang) {
+        const url = `${DRAMABOS_API}/book/quick/open?bookId=${bookId}&lang=${lang}`;
+        
+        const headerVariants = [
+            // Variant 1: Minimal
+            {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            // Variant 2: Full browser
+            {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Origin': 'https://goodshort.dramabos.my.id',
+                'Referer': 'https://goodshort.dramabos.my.id/',
+                'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+            },
+            // Variant 3: Dengan region
+            {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'x-region': 'ID',
+                'x-lang': lang
+            }
+        ];
+        
+        const results = [];
+        
+        for (let i = 0; i < headerVariants.length; i++) {
+            try {
+                console.log(`\n=== Testing variant ${i + 1} ===`);
+                console.log(`URL: ${url}`);
+                
+                const response = await axios.get(url, {
+                    headers: headerVariants[i],
+                    timeout: 15000,
+                    validateStatus: () => true // Accept any status
+                });
+                
+                results.push({
+                    variant: i + 1,
+                    status: response.status,
+                    success: response.data?.success || false,
+                    data_exists: !!response.data,
+                    headers_used: Object.keys(headerVariants[i]),
+                    response_preview: JSON.stringify(response.data).substring(0, 200)
+                });
+                
+                // Kalau sukses, return langsung
+                if (response.data && response.data.success) {
+                    console.log(`✓ Success with variant ${i + 1}`);
+                    return {
+                        success: true,
+                        data: response.data,
+                        working_variant: i + 1
+                    };
+                }
+                
+            } catch (error) {
+                results.push({
+                    variant: i + 1,
+                    error: error.message
+                });
+            }
         }
+        
+        return {
+            success: false,
+            results: results,
+            tested_url: url
+        };
     }
     
-    // Routes
     const { url, query } = req;
     const pathname = url.split('?')[0];
     const parts = pathname.split('/').filter(Boolean);
@@ -47,155 +99,59 @@ export default async function handler(req, res) {
         // GET /
         if (parts.length === 0) {
             return res.json({
-                service: 'GoodShort API (via DramaBos)',
-                version: '10.0',
-                status: 'online',
-                source: 'https://goodshort.dramabos.my.id',
-                endpoints: {
-                    'GET /nav': 'Navigation menu',
-                    'GET /home?lang=in': 'Get all dramas',
-                    'GET /search?q=keyword&lang=in': 'Search dramas',
-                    'GET /hot?lang=in': 'Hot dramas',
-                    'GET /book/{bookId}?lang=in': 'Book detail (contoh: /book/31001241758?lang=in)',
-                    'GET /chapters/{bookId}?lang=in': 'Get chapters list',
-                    'GET /play/{chapterId}?lang=in': 'Get chapter with video sources',
-                    'GET /m3u8/{chapterId}?lang=in': 'Get direct m3u8 stream URL'
-                },
-                working_example: '/book/31001241758?lang=in'
+                service: 'GoodShort API - Debug Mode',
+                version: '11.0',
+                status: 'debugging',
+                test_endpoint: '/test/31001241758?lang=in',
+                note: 'Testing different header combinations'
             });
         }
         
-        // GET /nav
-        if (parts[0] === 'nav') {
-            return res.json({
-                status: 'success',
-                data: [
-                    { id: 'home', title: 'Home', path: '/home?lang=in' },
-                    { id: 'hot', title: 'Hot', path: '/hot?lang=in' },
-                    { id: 'search', title: 'Search', path: '/search?q=drama&lang=in' }
-                ]
-            });
-        }
-        
-        // GET /home
-        if (parts[0] === 'home') {
+        // GET /test/:bookId - Debugging endpoint
+        if (parts[0] === 'test' && parts[1]) {
+            const bookId = parts[1];
             const lang = query.lang || 'in';
             
-            // Try different endpoints
-            let data = await callAPI('/home', { lang });
-            
-            if (!data) {
-                data = await callAPI('/book/list', { lang });
-            }
-            
-            if (!data) {
-                data = await callAPI('/book/recommend', { lang });
-            }
-            
-            if (!data || !data.success) {
-                return res.status(500).json({
-                    status: 'error',
-                    message: 'Failed to fetch home data'
-                });
-            }
+            const result = await testAPI(bookId, lang);
             
             return res.json({
-                status: 'success',
+                status: result.success ? 'success' : 'failed',
+                book_id: bookId,
                 lang: lang,
-                data: data.data
+                result: result
             });
         }
         
-        // GET /search
-        if (parts[0] === 'search') {
-            const q = query.q || '';
-            const lang = query.lang || 'in';
-            
-            if (!q) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Query parameter "q" required. Example: /search?q=drama&lang=in'
-                });
-            }
-            
-            const data = await callAPI('/book/search', {
-                keyword: q,
-                lang: lang
-            });
-            
-            if (!data || !data.success) {
-                return res.status(500).json({
-                    status: 'error',
-                    message: 'Search failed'
-                });
-            }
-            
-            return res.json({
-                status: 'success',
-                query: q,
-                lang: lang,
-                total: data.data.list ? data.data.list.length : 0,
-                data: data.data
-            });
-        }
-        
-        // GET /hot
-        if (parts[0] === 'hot') {
-            const lang = query.lang || 'in';
-            
-            let data = await callAPI('/book/hot', { lang });
-            
-            if (!data) {
-                data = await callAPI('/book/recommend', { lang });
-            }
-            
-            if (!data || !data.success) {
-                return res.status(500).json({
-                    status: 'error',
-                    message: 'Failed to fetch hot dramas'
-                });
-            }
-            
-            return res.json({
-                status: 'success',
-                lang: lang,
-                data: data.data
-            });
-        }
-        
-        // GET /book/:bookId
+        // GET /book/:bookId - Using best variant
         if (parts[0] === 'book' && parts[1]) {
             const bookId = parts[1];
             const lang = query.lang || 'in';
             
-            // ENDPOINT YANG LU TUNJUKIN: /book/quick/open
-            const data = await callAPI('/book/quick/open', {
-                bookId: bookId,
-                lang: lang
-            });
+            const result = await testAPI(bookId, lang);
             
-            if (!data || !data.success) {
+            if (!result.success) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Book not found',
+                    message: 'Book not found - None of the header variants worked',
                     book_id: bookId,
-                    lang: lang
+                    lang: lang,
+                    debug_info: result.results,
+                    hint: 'Check /test/' + bookId + '?lang=' + lang + ' for details'
                 });
             }
             
-            // Format response
-            const book = data.data.book;
-            const chapters = data.data.list || [];
+            const book = result.data.data.book;
+            const chapters = result.data.data.list || [];
             
             return res.json({
                 status: 'success',
+                working_variant: result.working_variant,
                 data: {
                     id: book.bookId,
                     title: book.bookName,
                     description: book.introduction,
                     cover: book.cover || book.bookDetailCover,
                     author: book.playwright || book.producer,
-                    protagonist: book.protagonist,
                     language: book.languageDisplay,
                     status: book.writeStatus,
                     rating: book.ratings,
@@ -203,8 +159,6 @@ export default async function handler(req, res) {
                     view_display: book.viewCountDisplay,
                     tags: book.labels || [],
                     chapter_count: book.chapterCount,
-                    comment_count: book.commentCount,
-                    follow_count: book.followCount,
                     total_chapters: chapters.length,
                     chapters: chapters.map(ch => ({
                         id: ch.id,
@@ -212,170 +166,15 @@ export default async function handler(req, res) {
                         title: ch.chapterName,
                         image: ch.image,
                         play_time: ch.playTime,
-                        play_count: ch.playCount,
-                        price: ch.price,
-                        charged: ch.charged,
-                        next_chapter_id: ch.nextChapterId,
-                        prev_chapter_id: ch.prevChapterId
+                        play_count: ch.playCount
                     }))
-                }
-            });
-        }
-        
-        // GET /chapters/:bookId
-        if (parts[0] === 'chapters' && parts[1]) {
-            const bookId = parts[1];
-            const lang = query.lang || 'in';
-            
-            const data = await callAPI('/book/quick/open', {
-                bookId: bookId,
-                lang: lang
-            });
-            
-            if (!data || !data.success) {
-                return res.status(404).json({
-                    status: 'error',
-                    message: 'Book not found'
-                });
-            }
-            
-            const chapters = data.data.list || [];
-            
-            return res.json({
-                status: 'success',
-                book_id: bookId,
-                book_title: data.data.book.bookName,
-                lang: lang,
-                total: chapters.length,
-                data: chapters.map(ch => ({
-                    id: ch.id,
-                    chapter_number: ch.index + 1,
-                    title: ch.chapterName,
-                    image: ch.image,
-                    play_time: ch.playTime,
-                    play_count: ch.playCount,
-                    next_chapter_id: ch.nextChapterId,
-                    prev_chapter_id: ch.prevChapterId
-                }))
-            });
-        }
-        
-        // GET /play/:chapterId
-        if (parts[0] === 'play' && parts[1]) {
-            const chapterId = parts[1];
-            const lang = query.lang || 'in';
-            
-            const data = await callAPI('/book/chapter/open', {
-                chapterId: chapterId,
-                lang: lang
-            });
-            
-            if (!data || !data.success) {
-                return res.status(404).json({
-                    status: 'error',
-                    message: 'Chapter not found',
-                    chapter_id: chapterId
-                });
-            }
-            
-            const ch = data.data;
-            
-            // Extract video sources
-            const sources = [];
-            
-            if (ch.cdn) {
-                sources.push({ type: 'm3u8', quality: 'default', url: ch.cdn });
-            }
-            
-            if (ch.multiVideos) {
-                ch.multiVideos.forEach(v => {
-                    sources.push({ type: 'm3u8', quality: v.type, url: v.filePath });
-                    
-                    if (v.cdnList) {
-                        v.cdnList.forEach(cdn => {
-                            sources.push({
-                                type: 'm3u8',
-                                quality: `${v.type}_cdn`,
-                                url: cdn.videoPath,
-                                cdn_domain: cdn.cdnDomain
-                            });
-                        });
-                    }
-                });
-            }
-            
-            return res.json({
-                status: 'success',
-                data: {
-                    id: ch.id,
-                    book_id: ch.bookId,
-                    title: ch.chapterName,
-                    image: ch.image,
-                    play_time: ch.playTime,
-                    index: ch.index,
-                    next_chapter_id: ch.nextChapterId,
-                    prev_chapter_id: ch.prevChapterId,
-                    total_sources: sources.length,
-                    sources: sources
-                }
-            });
-        }
-        
-        // GET /m3u8/:chapterId
-        if (parts[0] === 'm3u8' && parts[1]) {
-            const chapterId = parts[1];
-            const lang = query.lang || 'in';
-            
-            const data = await callAPI('/book/chapter/open', {
-                chapterId: chapterId,
-                lang: lang
-            });
-            
-            if (!data || !data.success) {
-                return res.status(404).json({
-                    status: 'error',
-                    message: 'Stream not found'
-                });
-            }
-            
-            const ch = data.data;
-            
-            // Get best quality (1080p prioritized)
-            let bestUrl = ch.cdn || '';
-            let quality = 'default';
-            
-            if (ch.multiVideos) {
-                const video1080 = ch.multiVideos.find(v => v.type === '1080p');
-                const video720 = ch.multiVideos.find(v => v.type === '720p');
-                const video540 = ch.multiVideos.find(v => v.type === '540p');
-                
-                if (video1080) {
-                    bestUrl = video1080.filePath;
-                    quality = '1080p';
-                } else if (video720) {
-                    bestUrl = video720.filePath;
-                    quality = '720p';
-                } else if (video540) {
-                    bestUrl = video540.filePath;
-                    quality = '540p';
-                }
-            }
-            
-            return res.json({
-                status: 'success',
-                data: {
-                    id: chapterId,
-                    stream_url: bestUrl,
-                    type: 'm3u8',
-                    quality: quality
                 }
             });
         }
         
         return res.status(404).json({
             status: 'error',
-            message: 'Endpoint not found',
-            path: pathname
+            message: 'Endpoint not found. Try /test/31001241758?lang=in'
         });
         
     } catch (error) {
