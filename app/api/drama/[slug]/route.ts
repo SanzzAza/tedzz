@@ -1,61 +1,32 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { scrapeDramaDetail } from '@/lib/scraper';
-import { withCache } from '@/lib/cache';
-import type { APIResponse, DramaDetail } from '@/lib/types';
+import { NextRequest, NextResponse } from 'next/server'
+import { scrapeDramaDetail } from '@/lib/scraper'
+import { cached } from '@/lib/cache'
+import type { ApiRes, DramaDetail } from '@/lib/types'
 
-export const runtime = 'nodejs';
-export const maxDuration = 30;
+export const runtime = 'nodejs'
+export const maxDuration = 30
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { slug: string } }
-) {
+export async function GET(_req: NextRequest, { params }: { params: { slug: string } }) {
   try {
-    const { slug } = params;
+    const { slug } = params
+    if (!slug) return NextResponse.json({ ok: false, msg: 'slug required' }, { status: 400 })
 
-    if (!slug) {
-      return NextResponse.json(
-        { success: false, message: 'slug is required' },
-        { status: 400 }
-      );
-    }
+    const { data, hit } = await cached(`drama:${slug}`, () => scrapeDramaDetail(slug), 600)
 
-    const cacheKey = `drama:${slug}`;
+    if (!data) return NextResponse.json({ ok: false, msg: 'Drama not found' }, { status: 404 })
 
-    const { data, cached } = await withCache(
-      cacheKey,
-      () => scrapeDramaDetail(slug),
-      600
-    );
-
-    if (!data) {
-      return NextResponse.json(
-        { success: false, message: 'Drama not found' },
-        { status: 404 }
-      );
-    }
-
-    const response: APIResponse<DramaDetail> = {
-      success: true,
+    const res: ApiRes<DramaDetail> = {
+      ok: true,
       data,
-      cached,
-      timestamp: new Date().toISOString(),
-    };
+      cached: hit,
+      ts: new Date().toISOString(),
+    }
 
-    return NextResponse.json(response, {
-      headers: {
-        'Cache-Control': 's-maxage=600, stale-while-revalidate=1200',
-      },
-    });
-  } catch (error) {
+    return NextResponse.json(res)
+  } catch (e) {
     return NextResponse.json(
-      {
-        success: false,
-        data: null,
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      },
+      { ok: false, data: null, cached: false, ts: new Date().toISOString(), msg: String(e) },
       { status: 500 }
-    );
+    )
   }
 }
