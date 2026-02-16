@@ -1,55 +1,33 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { scrapeDramas, scrapeHome } from '@/lib/scraper';
-import { withCache } from '@/lib/cache';
-import type { APIResponse, DramaCard } from '@/lib/types';
+import { NextRequest, NextResponse } from 'next/server'
+import { scrapeDramas } from '@/lib/scraper'
+import { cached } from '@/lib/cache'
+import type { ApiRes, DramaCard } from '@/lib/types'
 
-export const runtime = 'nodejs';
-export const maxDuration = 30;
+export const runtime = 'nodejs'
+export const maxDuration = 30
 
-export async function GET(request: NextRequest) {
+export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const page = parseInt(searchParams.get('page') || '1');
-    const category = searchParams.get('category') || undefined;
+    const sp = req.nextUrl.searchParams
+    const page = parseInt(sp.get('page') || '1')
+    const category = sp.get('category') || undefined
 
-    const cacheKey = `dramas:${page}:${category || 'all'}`;
+    const key = `dramas:${page}:${category || 'all'}`
+    const { data, hit } = await cached(key, () => scrapeDramas(page, category), 300)
 
-    const { data, cached } = await withCache(
-      cacheKey,
-      () => scrapeDramas(page, category),
-      300
-    );
-
-    const response: APIResponse<{
-      dramas: DramaCard[];
-      page: number;
-      hasMore: boolean;
-    }> = {
-      success: true,
-      data: {
-        dramas: data.dramas,
-        page,
-        hasMore: data.hasMore,
-      },
-      cached,
-      timestamp: new Date().toISOString(),
+    const res: ApiRes<{ dramas: DramaCard[]; page: number; hasMore: boolean }> = {
+      ok: true,
+      data: { dramas: data.dramas, page, hasMore: data.hasMore },
+      cached: hit,
+      ts: new Date().toISOString(),
       source: data.source,
-    };
+    }
 
-    return NextResponse.json(response, {
-      headers: {
-        'Cache-Control': 's-maxage=300, stale-while-revalidate=600',
-      },
-    });
-  } catch (error) {
+    return NextResponse.json(res)
+  } catch (e) {
     return NextResponse.json(
-      {
-        success: false,
-        data: null,
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      },
+      { ok: false, data: null, cached: false, ts: new Date().toISOString(), msg: String(e) },
       { status: 500 }
-    );
+    )
   }
 }
