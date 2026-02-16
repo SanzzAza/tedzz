@@ -1,110 +1,64 @@
-// ================================
-// TYPE DEFINITIONS
-// ================================
-
-export interface Drama {
-  id: string;
-  slug: string;
-  title: string;
-  originalTitle?: string;
-  url: string;
-  coverImage: string;
-  description: string;
-  genre: string[];
-  tags: string[];
-  totalEpisodes: number;
-  rating: number;
-  views: string;
-  status: 'ongoing' | 'completed' | 'unknown';
-  language: string;
-  year: string;
-  updatedAt?: string;
+export interface DramaCard {
+  id: string
+  slug: string
+  title: string
+  cover: string
+  url: string
+  episodes?: number
+  rating?: number
+  genre?: string
+  views?: string
+  status?: string
 }
 
-export interface DramaDetail extends Drama {
-  episodes: Episode[];
-  cast?: string[];
-  director?: string;
-  relatedDramas?: DramaCard[];
+export interface DramaDetail {
+  id: string
+  slug: string
+  title: string
+  originalTitle: string
+  cover: string
+  url: string
+  description: string
+  genre: string[]
+  tags: string[]
+  totalEpisodes: number
+  rating: number
+  views: string
+  status: string
+  language: string
+  year: string
+  cast: string[]
+  episodes: Episode[]
 }
 
 export interface Episode {
-  number: number;
-  title: string;
-  url: string;
-  streamUrl?: string;
-  thumbnail?: string;
-  duration?: string;
-  isFree: boolean;
-  isVip: boolean;
+  number: number
+  title: string
+  url: string
+  streamUrl: string
+  thumbnail: string
+  duration: string
+  isFree: boolean
+  isVip: boolean
 }
 
-export interface DramaCard {
-  id: string;
-  slug: string;
-  title: string;
-  coverImage: string;
-  url: string;
-  totalEpisodes?: number;
-  rating?: number;
-  genre?: string;
-  latestEpisode?: string;
+export interface HomeData {
+  banners: { title: string; image: string; url: string }[]
+  sections: { title: string; dramas: DramaCard[] }[]
+  categories: { name: string; slug: string }[]
+  allDramas: DramaCard[]
 }
 
-export interface HomePageData {
-  banners: Banner[];
-  sections: HomeSection[];
-  categories: Category[];
+export interface StreamInfo {
+  episodeUrl: string
+  streams: { url: string; type: string; quality: string }[]
 }
 
-export interface Banner {
-  id: string;
-  title: string;
-  image: string;
-  url: string;
-}
-
-export interface HomeSection {
-  title: string;
-  type: string;
-  dramas: DramaCard[];
-  moreUrl?: string;
-}
-
-export interface Category {
-  id: string;
-  name: string;
-  slug: string;
-  count?: number;
-}
-
-export interface StreamData {
-  url: string;
-  quality: string;
-  type: 'hls' | 'mp4' | 'dash';
-  headers?: Record<string, string>;
-}
-
-export interface SearchResult {
-  query: string;
-  total: number;
-  page: number;
-  dramas: DramaCard[];
-}
-
-export interface APIResponse<T = unknown> {
-  success: boolean;
-  data: T;
-  message?: string;
-  cached?: boolean;
-  timestamp: string;
-  source?: string;
-}
-
-export interface ScrapedPageData {
-  nextData?: Record<string, unknown>;
-  nuxtData?: Record<string, unknown>;
-  inlineData?: Record<string, unknown>[];
-  apiEndpoints?: string[];
-  html?: string;
+export interface ApiRes<T = unknown> {
+  ok: boolean
+  data: T
+  cached: boolean
+  ts: string
+  msg?: string
+  source?: string
 }
