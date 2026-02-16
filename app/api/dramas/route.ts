@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { scrapeDramas } from '@/lib/scraper'
 import { cached } from '@/lib/cache'
-import type { ApiRes, DramaCard } from '@/lib/types'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
@@ -11,23 +10,9 @@ export async function GET(req: NextRequest) {
     const sp = req.nextUrl.searchParams
     const page = parseInt(sp.get('page') || '1')
     const category = sp.get('category') || undefined
-
-    const key = `dramas:${page}:${category || 'all'}`
-    const { data, hit } = await cached(key, () => scrapeDramas(page, category), 300)
-
-    const res: ApiRes<{ dramas: DramaCard[]; page: number; hasMore: boolean }> = {
-      ok: true,
-      data: { dramas: data.dramas, page, hasMore: data.hasMore },
-      cached: hit,
-      ts: new Date().toISOString(),
-      source: data.source,
-    }
-
-    return NextResponse.json(res)
+    const { data, hit } = await cached(`dramas:${page}:${category||'all'}`, () => scrapeDramas(page, category), 300)
+    return NextResponse.json({ ok: true, data: { dramas: data.dramas, page, hasMore: data.hasMore }, cached: hit, ts: new Date().toISOString(), source: data.source })
   } catch (e) {
-    return NextResponse.json(
-      { ok: false, data: null, cached: false, ts: new Date().toISOString(), msg: String(e) },
-      { status: 500 }
-    )
+    return NextResponse.json({ ok: false, data: null, msg: String(e), ts: new Date().toISOString() }, { status: 500 })
   }
 }
