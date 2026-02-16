@@ -1,48 +1,33 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { scrapeSearch } from '@/lib/scraper';
-import { withCache } from '@/lib/cache';
-import type { APIResponse, SearchResult } from '@/lib/types';
+import { NextRequest, NextResponse } from 'next/server'
+import { scrapeSearch } from '@/lib/scraper'
+import { cached } from '@/lib/cache'
+import type { ApiRes, DramaCard } from '@/lib/types'
 
-export const runtime = 'nodejs';
-export const maxDuration = 30;
+export const runtime = 'nodejs'
+export const maxDuration = 30
 
-export async function GET(request: NextRequest) {
+export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const q = searchParams.get('q');
-    const page = parseInt(searchParams.get('page') || '1');
+    const q = req.nextUrl.searchParams.get('q')
+    const page = parseInt(req.nextUrl.searchParams.get('page') || '1')
 
-    if (!q) {
-      return NextResponse.json(
-        { success: false, message: 'q (query) parameter is required' },
-        { status: 400 }
-      );
+    if (!q) return NextResponse.json({ ok: false, msg: 'q (query) required' }, { status: 400 })
+
+    const { data, hit } = await cached(`search:${q}:${page}`, () => scrapeSearch(q, page), 180)
+
+    const res: ApiRes<{ query: string; total: number; dramas: DramaCard[] }> = {
+      ok: true,
+      data: { query: q, total: data.total, dramas: data.dramas },
+      cached: hit,
+      ts: new Date().toISOString(),
+      source: data.source,
     }
 
-    const cacheKey = `search:${q}:${page}`;
-    const { data, cached } = await withCache(
-      cacheKey,
-      () => scrapeSearch(q, page),
-      180
-    );
-
-    const response: APIResponse<SearchResult> = {
-      success: true,
-      data,
-      cached,
-      timestamp: new Date().toISOString(),
-    };
-
-    return NextResponse.json(response);
-  } catch (error) {
+    return NextResponse.json(res)
+  } catch (e) {
     return NextResponse.json(
-      {
-        success: false,
-        data: null,
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      },
+      { ok: false, data: null, cached: false, ts: new Date().toISOString(), msg: String(e) },
       { status: 500 }
-    );
+    )
   }
 }
