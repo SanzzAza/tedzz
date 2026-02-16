@@ -1,949 +1,1019 @@
-// ================================
-// CORE SCRAPER ENGINE
-// ================================
+import * as cheerio from 'cheerio'
+import type { DramaCard, DramaDetail, Episode, HomeData, StreamInfo } from './types'
 
-import * as cheerio from 'cheerio';
-import { CONFIG, SELECTORS } from './constants';
-import type {
-  DramaCard,
-  DramaDetail,
-  Episode,
-  HomeSection,
-  Category,
-  ScrapedPageData,
-  SearchResult,
-  Banner,
-} from './types';
+// ═══════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════
 
-// ─── HTTP Fetcher ────────────────────────
+const BASE = process.env.GOODSHORT_BASE || 'https://www.goodshort.com'
+const LANG = process.env.LANG_CODE || 'id'
+const HOME = `${BASE}/${LANG}`
 
-async function fetchPage(url: string, isApi = false): Promise<string> {
-  const headers = isApi ? CONFIG.API_HEADERS : CONFIG.HEADERS;
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
-  const res = await fetch(url, {
-    headers: {
-      ...headers,
-      Referer: CONFIG.HOME_URL,
-      Origin: CONFIG.BASE_URL,
-    },
-    next: { revalidate: 300 },
-  });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${url}`);
-  }
-
-  return res.text();
+const HEADERS: Record<string, string> = {
+  'User-Agent': UA,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'id-ID,id;q=0.9,en;q=0.7',
+  'Referer': HOME,
 }
 
-async function fetchJSON<T = unknown>(url: string, body?: unknown): Promise<T | null> {
+const API_HEADERS: Record<string, string> = {
+  'User-Agent': UA,
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'id-ID,id;q=0.9',
+  'Referer': HOME,
+  'Origin': BASE,
+}
+
+// ═══════════════════════════════════════════
+// HTTP HELPERS
+// ═══════════════════════════════════════════
+
+async function get(url: string): Promise<string> {
+  const r = await fetch(url, { headers: HEADERS, next: { revalidate: 300 } })
+  if (!r.ok) throw new Error(`HTTP ${r.status} → ${url}`)
+  return r.text()
+}
+
+async function api<T = unknown>(url: string, body?: unknown): Promise<T | null> {
   try {
-    const options: RequestInit = {
-      headers: {
-        ...CONFIG.API_HEADERS,
-        Referer: CONFIG.HOME_URL,
-        Origin: CONFIG.BASE_URL,
-      },
-    };
-
+    const opts: RequestInit = { headers: API_HEADERS }
     if (body) {
-      options.method = 'POST';
-      options.body = JSON.stringify(body);
+      opts.method = 'POST'
+      opts.body = JSON.stringify(body)
+      ;(opts.headers as Record<string, string>)['Content-Type'] = 'application/json'
     }
+    const r = await fetch(url, opts)
+    if (!r.ok) return null
+    const ct = r.headers.get('content-type') || ''
+    if (!ct.includes('json')) return null
+    return r.json() as Promise<T>
+  } catch { return null }
+}
 
-    const res = await fetch(url, options);
-    if (!res.ok) return null;
+function abs(href: string): string {
+  if (!href) return ''
+  if (href.startsWith('http')) return href
+  if (href.startsWith('//')) return 'https:' + href
+  return BASE + (href.startsWith('/') ? '' : '/') + href
+}
 
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('json')) return null;
+function slug(url: string): string {
+  return url.replace(/\/$/, '').split('/').pop() || ''
+}
 
-    return (await res.json()) as T;
-  } catch {
-    return null;
+// ═══════════════════════════════════════════
+// DEEP DATA EXTRACTION
+// ═══════════════════════════════════════════
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function deepSearch(obj: any, test: (k: string, v: unknown) => boolean, depth = 0): unknown[] {
+  const out: unknown[] = []
+  if (depth > 15 || !obj) return out
+  if (Array.isArray(obj)) {
+    for (const item of obj) out.push(...deepSearch(item, test, depth + 1))
+  } else if (typeof obj === 'object') {
+    for (const [k, v] of Object.entries(obj)) {
+      if (test(k, v)) out.push(v)
+      out.push(...deepSearch(v, test, depth + 1))
+    }
+  }
+  return out
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function findDramaArrays(data: any): any[][] {
+  return deepSearch(data, (_k, v) => {
+    if (!Array.isArray(v) || v.length === 0 || typeof v[0] !== 'object') return false
+    const keys = Object.keys(v[0])
+    const hits = ['title', 'name', 'cover', 'image', 'poster', 'coverUrl', 'id', 'drama_id', 'video_id'].filter(x => keys.includes(x))
+    return hits.length >= 2
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any[][]
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function findEpisodeArrays(data: any): any[][] {
+  return deepSearch(data, (k, v) => {
+    return ['episodes', 'episodeList', 'episode_list', 'videoList', 'video_list', 'playlist', 'chapterList'].includes(k)
+      && Array.isArray(v) && v.length > 0
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any[][]
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function findStreamUrls(data: any): string[] {
+  const urls = deepSearch(data, (k, v) => {
+    if (typeof v !== 'string') return false
+    const isKey = ['playUrl', 'videoUrl', 'streamUrl', 'video_url', 'play_url', 'hls_url', 'mp4_url', 'url', 'src', 'source'].includes(k)
+    const isMedia = /\.(m3u8|mp4|ts)/.test(v) || /video|stream|play|media|cdn/.test(v)
+    return isKey && isMedia
+  }) as string[]
+  return [...new Set(urls)]
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeCard(item: any): DramaCard {
+  const id = String(item.id || item.drama_id || item.videoId || item.video_id || item.sid || '')
+  const title = String(item.title || item.name || item.drama_name || item.videoName || '')
+  const cover = String(item.cover || item.coverUrl || item.cover_url || item.image || item.poster || item.img || item.pic || '')
+  const dramaSlug = String(item.slug || item.id || item.drama_id || '')
+  const dramaUrl = String(item.url || item.detailUrl || item.detail_url || item.shareUrl || '')
+
+  return {
+    id,
+    slug: dramaSlug,
+    title,
+    cover: abs(cover),
+    url: dramaUrl ? abs(dramaUrl) : `${HOME}/drama/${dramaSlug || id}`,
+    episodes: Number(item.totalEpisodes || item.episodeCount || item.episode_count || item.total_episodes || item.episodeTotal || 0),
+    rating: Number(item.rating || item.score || 0),
+    genre: String(item.genre || item.category || item.categoryName || item.tag || ''),
+    views: String(item.views || item.playCount || item.play_count || item.viewCount || ''),
+    status: String(item.status || ''),
   }
 }
 
-// ─── Page Data Extractor ────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeEpisode(item: any, i: number): Episode {
+  return {
+    number: Number(item.number || item.episode || item.ep || item.sort || item.index || item.order || i + 1),
+    title: String(item.title || item.name || item.episodeName || `Episode ${i + 1}`),
+    url: abs(String(item.url || item.detailUrl || item.detail_url || item.pageUrl || '')),
+    streamUrl: String(item.streamUrl || item.videoUrl || item.playUrl || item.video_url || item.play_url || item.hls || item.mp4 || ''),
+    thumbnail: abs(String(item.thumbnail || item.cover || item.image || item.thumb || '')),
+    duration: String(item.duration || item.time || ''),
+    isFree: item.isFree !== undefined ? Boolean(item.isFree) : item.free !== undefined ? Boolean(item.free) : !item.isVip && !item.vip && !item.locked,
+    isVip: Boolean(item.isVip || item.vip || item.locked || item.is_vip || false),
+  }
+}
 
-function extractPageData(html: string): ScrapedPageData {
-  const $ = cheerio.load(html);
-  const result: ScrapedPageData = {};
+// ═══════════════════════════════════════════
+// SSR DATA EXTRACTION (Next.js / Nuxt)
+// ═══════════════════════════════════════════
 
-  // 1. Next.js __NEXT_DATA__
-  const nextScript = $('#__NEXT_DATA__');
-  if (nextScript.length) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractSSR(html: string): { type: string; data: any; buildId?: string } | null {
+  const $ = cheerio.load(html)
+
+  // Next.js
+  const nextScript = $('#__NEXT_DATA__').html()
+  if (nextScript) {
     try {
-      result.nextData = JSON.parse(nextScript.html() || '{}');
-    } catch {
-      /* skip */
-    }
+      const d = JSON.parse(nextScript)
+      return { type: 'nextjs', data: d, buildId: d.buildId }
+    } catch { /* skip */ }
   }
 
-  // 2. Nuxt.js __NUXT__
+  // Nuxt.js
+  let nuxtData = null
   $('script').each((_, el) => {
-    const text = $(el).html() || '';
-    const nuxtMatch = text.match(/window\.__NUXT__\s*=\s*(.+?)(?:;?\s*$)/s);
-    if (nuxtMatch) {
-      try {
-        result.nuxtData = JSON.parse(nuxtMatch[1]);
-      } catch {
-        /* eval-style nuxt data, skip */
-      }
-    }
-  });
+    const txt = $(el).html() || ''
+    const m = txt.match(/window\.__NUXT__\s*=\s*(.+?);\s*$/s)
+    if (m) { try { nuxtData = JSON.parse(m[1]) } catch { /* skip */ } }
+  })
+  if (nuxtData) return { type: 'nuxtjs', data: nuxtData }
 
-  // 3. Inline JSON / window.__DATA__
-  result.inlineData = [];
+  // Generic window.__DATA__
   $('script').each((_, el) => {
-    const text = $(el).html() || '';
+    const txt = $(el).html() || ''
     const patterns = [
       /window\.__INITIAL_STATE__\s*=\s*({.+?});/s,
       /window\.__DATA__\s*=\s*({.+?});/s,
       /window\.__PRELOADED_STATE__\s*=\s*({.+?});/s,
-      /var\s+pageData\s*=\s*({.+?});/s,
-      /var\s+__data__\s*=\s*({.+?});/s,
-    ];
-
-    for (const pat of patterns) {
-      const m = text.match(pat);
+      /window\.pageData\s*=\s*({.+?});/s,
+    ]
+    for (const p of patterns) {
+      const m = txt.match(p)
       if (m) {
         try {
-          result.inlineData!.push(JSON.parse(m[1]));
-        } catch {
-          /* skip */
-        }
+          nuxtData = JSON.parse(m[1])
+          return false // break each
+        } catch { /* skip */ }
       }
     }
-  });
+  })
+  if (nuxtData) return { type: 'inline', data: nuxtData }
 
-  return result;
+  return null
 }
 
-// ─── Deep Object Search ─────────────────
+// ═══════════════════════════════════════════
+// HTML PARSERS
+// ═══════════════════════════════════════════
 
-function deepFind<T>(
-  obj: unknown,
-  predicate: (key: string, value: unknown) => boolean,
-  depth = 0
-): T[] {
-  const results: T[] = [];
-  if (depth > 12 || !obj) return results;
+function parseDramaCards($: cheerio.CheerioAPI): DramaCard[] {
+  const cards: DramaCard[] = []
+  const seen = new Set<string>()
 
-  if (typeof obj === 'object' && obj !== null) {
-    if (Array.isArray(obj)) {
-      for (const item of obj) {
-        results.push(...deepFind<T>(item, predicate, depth + 1));
-      }
-    } else {
-      const record = obj as Record<string, unknown>;
-      for (const [key, value] of Object.entries(record)) {
-        if (predicate(key, value)) {
-          results.push(value as T);
-        }
-        results.push(...deepFind<T>(value, predicate, depth + 1));
-      }
-    }
-  }
+  // Collect all <a> with images that link to drama-like URLs
+  $('a[href]').each((_, el) => {
+    const $a = $(el)
+    const href = $a.attr('href') || ''
 
-  return results;
+    // Must look like a drama URL
+    if (!/\/(drama|detail|series|video|play|short|watch|id)\//i.test(href)) return
+    // Skip static/nav links
+    if (/\/(login|register|about|help|faq|terms|privacy|download)/i.test(href)) return
+
+    const fullUrl = abs(href)
+    if (seen.has(fullUrl)) return
+
+    const $img = $a.find('img').first()
+    const title = (
+      $img.attr('alt') ||
+      $a.find('[class*="title"], [class*="name"], h2, h3, h4, p').first().text().trim() ||
+      $a.attr('title') ||
+      ''
+    ).trim()
+
+    if (!title || title.length < 2) return
+
+    const cover = $img.attr('src') || $img.attr('data-src') || $img.attr('data-lazy-src') || ''
+
+    seen.add(fullUrl)
+    cards.push({
+      id: slug(href),
+      slug: slug(href),
+      title,
+      cover: abs(cover),
+      url: fullUrl,
+    })
+  })
+
+  return cards
 }
 
-function findDramaArrays(data: unknown): DramaCard[][] {
-  return deepFind<DramaCard[]>(data, (key, value) => {
-    if (!Array.isArray(value) || value.length === 0) return false;
-    if (typeof value[0] !== 'object' || value[0] === null) return false;
-    const keys = Object.keys(value[0]);
-    const indicators = ['title', 'name', 'cover', 'image', 'poster', 'id', 'coverUrl', 'drama_name'];
-    return indicators.filter((k) => keys.includes(k)).length >= 2;
-  });
-}
+function parseEpisodesHTML($: cheerio.CheerioAPI): Episode[] {
+  const eps: Episode[] = []
 
-// ─── HTML Parsers ───────────────────────
+  // Strategy 1: episode containers
+  const containerSels = [
+    '[class*="episode"]', '[class*="ep-list"]', '[class*="playlist"]',
+    '[class*="video-list"]', '[class*="chapter"]',
+  ]
 
-function parseDramaCardsFromHTML($: cheerio.CheerioAPI): DramaCard[] {
-  const cards: DramaCard[] = [];
-  const seen = new Set<string>();
+  for (const sel of containerSels) {
+    const $c = $(sel).first()
+    if (!$c.length) continue
 
-  for (const selector of SELECTORS.DRAMA_CARDS) {
-    const els = $(selector);
-    if (els.length < 2) continue;
+    $c.find('a[href], button, [role="button"], li').each((i, el) => {
+      const $el = $(el)
+      const href = $el.closest('a').attr('href') || $el.attr('href') || ''
+      const text = $el.text().trim()
+      const num = text.match(/\d+/)
 
-    els.each((_, el) => {
-      const $el = $(el);
-      const $link = $el.is('a') ? $el : $el.find('a').first();
-      const href = $link.attr('href') || '';
-
-      if (!href || seen.has(href)) return;
-
-      const fullUrl = href.startsWith('http') ? href : `${CONFIG.BASE_URL}${href}`;
-
-      // Check if URL looks like a drama page
-      const isDramaUrl = SELECTORS.DRAMA_URL_PATTERNS.some((p) => p.test(href));
-      if (!isDramaUrl && !href.includes('/id/')) return;
-
-      const $img = $el.find('img').first();
-      const title =
-        $img.attr('alt') ||
-        $el.find('[class*="title"], [class*="name"], h2, h3, h4').first().text().trim() ||
-        $el.text().trim().split('\n')[0]?.trim() ||
-        '';
-
-      if (!title) return;
-
-      const coverImage =
-        $img.attr('src') || $img.attr('data-src') || $img.attr('data-lazy-src') || '';
-
-      // Extract slug from URL
-      const slugMatch = href.match(/\/([^/]+)\/?$/);
-      const slug = slugMatch?.[1] || '';
-
-      const card: DramaCard = {
-        id: slug || Buffer.from(fullUrl).toString('base64url').slice(0, 16),
-        slug,
-        title,
-        coverImage,
-        url: fullUrl,
-      };
-
-      // Try extract episode count
-      const epText = $el.text().match(/(\d+)\s*(?:ep|episode|集)/i);
-      if (epText) card.totalEpisodes = parseInt(epText[1]);
-
-      // Try extract rating
-      const ratingText = $el.find('[class*="rating"], [class*="score"]').text();
-      const ratingMatch = ratingText.match(/([\d.]+)/);
-      if (ratingMatch) card.rating = parseFloat(ratingMatch[1]);
-
-      seen.add(href);
-      cards.push(card);
-    });
-
-    if (cards.length > 0) break;
-  }
-
-  return cards;
-}
-
-function parseSectionsFromHTML($: cheerio.CheerioAPI): HomeSection[] {
-  const sections: HomeSection[] = [];
-
-  for (const selector of SELECTORS.SECTIONS) {
-    $(selector).each((_, el) => {
-      const $section = $(el);
-      const title =
-        $section.find('h2, h3, [class*="title"]').first().text().trim();
-
-      if (!title) return;
-
-      const dramas: DramaCard[] = [];
-      $section.find('a[href]').each((_, a) => {
-        const $a = $(a);
-        const href = $a.attr('href') || '';
-        const isDramaUrl = SELECTORS.DRAMA_URL_PATTERNS.some((p) => p.test(href));
-
-        if (!isDramaUrl) return;
-
-        const $img = $a.find('img').first();
-        const cardTitle = $img.attr('alt') || $a.text().trim().split('\n')[0]?.trim() || '';
-
-        if (!cardTitle) return;
-
-        const slugMatch = href.match(/\/([^/]+)\/?$/);
-        dramas.push({
-          id: slugMatch?.[1] || '',
-          slug: slugMatch?.[1] || '',
-          title: cardTitle,
-          coverImage: $img.attr('src') || $img.attr('data-src') || '',
-          url: href.startsWith('http') ? href : `${CONFIG.BASE_URL}${href}`,
-        });
-      });
-
-      if (dramas.length > 0) {
-        sections.push({
-          title,
-          type: 'horizontal',
-          dramas,
-        });
-      }
-    });
-
-    if (sections.length > 0) break;
-  }
-
-  return sections;
-}
-
-function parseEpisodesFromHTML($: cheerio.CheerioAPI): Episode[] {
-  const episodes: Episode[] = [];
-
-  for (const selector of SELECTORS.EPISODE_LIST) {
-    const container = $(selector).first();
-    if (!container.length) continue;
-
-    container.find('a[href], button, [role="button"]').each((i, el) => {
-      const $el = $(el);
-      const href = $el.attr('href') || '';
-      const text = $el.text().trim();
-      const numMatch = text.match(/\d+/);
-
-      episodes.push({
-        number: numMatch ? parseInt(numMatch[0]) : i + 1,
+      eps.push({
+        number: num ? parseInt(num[0]) : i + 1,
         title: text || `Episode ${i + 1}`,
-        url: href.startsWith('http') ? href : href ? `${CONFIG.BASE_URL}${href}` : '',
+        url: abs(href),
+        streamUrl: '',
+        thumbnail: abs($el.find('img').attr('src') || ''),
+        duration: $el.find('[class*="duration"], [class*="time"]').text().trim(),
         isFree: !$el.find('[class*="vip"], [class*="lock"], [class*="coin"]').length,
         isVip: !!$el.find('[class*="vip"], [class*="lock"]').length,
-        thumbnail: $el.find('img').attr('src') || '',
-        duration: $el.find('[class*="duration"], [class*="time"]').text().trim() || undefined,
-      });
-    });
+      })
+    })
 
-    if (episodes.length > 0) break;
+    if (eps.length > 0) break
   }
 
-  // Fallback: cari semua link yang mengandung angka episode
-  if (episodes.length === 0) {
-    $('a[href]').each((i, el) => {
-      const $el = $(el);
-      const href = $el.attr('href') || '';
-      const text = $el.text().trim();
+  return eps
+}
 
-      if (/(?:episode|ep\.?\s*)\d+/i.test(text) || /\/ep(?:isode)?\/?\d+/i.test(href)) {
-        const numMatch = text.match(/\d+/) || href.match(/(\d+)\/?$/);
-        episodes.push({
-          number: numMatch ? parseInt(numMatch[0] || numMatch[1]) : i + 1,
-          title: text || `Episode ${i + 1}`,
-          url: href.startsWith('http') ? href : `${CONFIG.BASE_URL}${href}`,
-          isFree: true,
-          isVip: false,
-        });
+function parseDetailHTML($: cheerio.CheerioAPI): Partial<DramaDetail> {
+  return {
+    title: $('h1').first().text().trim() ||
+      $('meta[property="og:title"]').attr('content') ||
+      $('title').text().trim() || '',
+
+    cover: abs(
+      $('meta[property="og:image"]').attr('content') ||
+      $('[class*="cover"] img, [class*="poster"] img').first().attr('src') || ''
+    ),
+
+    description:
+      $('[class*="desc"], [class*="synopsis"], [class*="summary"], [class*="intro"]').first().text().trim() ||
+      $('meta[name="description"]').attr('content') ||
+      $('meta[property="og:description"]').attr('content') || '',
+
+    genre: $('[class*="genre"] a, [class*="tag"] a, [class*="category"] a')
+      .map((_, el) => $(el).text().trim()).get().filter(Boolean),
+
+    rating: parseFloat($('[class*="rating"], [class*="score"]').first().text().match(/([\d.]+)/)?.[1] || '0'),
+
+    views: $('[class*="view"], [class*="play-count"]').first().text().trim(),
+
+    episodes: parseEpisodesHTML($),
+  }
+}
+
+function extractStreamFromHTML(html: string): string[] {
+  const urls: string[] = []
+
+  // m3u8 & mp4 URLs
+  const m3u8 = html.match(/https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/g)
+  if (m3u8) urls.push(...m3u8)
+
+  const mp4 = html.match(/https?:\/\/[^\s"'<>\\]+\.mp4[^\s"'<>\\]*/g)
+  if (mp4) urls.push(...mp4)
+
+  // Key-value patterns in JS
+  const kvPatterns = /(?:playUrl|videoUrl|streamUrl|video_url|play_url|hls_url|mp4_url|src|source|url)\s*[=:]\s*["'](https?:\/\/[^"']+)["']/gi
+  let m
+  while ((m = kvPatterns.exec(html)) !== null) {
+    if (/\.(m3u8|mp4|ts)|video|stream|play|media|cdn/i.test(m[1])) {
+      urls.push(m[1])
+    }
+  }
+
+  return [...new Set(urls)]
+}
+
+// ═══════════════════════════════════════════
+// API ENDPOINT DISCOVERY
+// ═══════════════════════════════════════════
+
+const API_PATHS = {
+  HOME: ['/api/home', '/api/home/data', '/api/home/index', '/api/index', '/api/init', '/api/app/config', '/api/v1/home', '/api/v2/home'],
+  LIST: ['/api/drama/list', '/api/v1/drama/list', '/api/video/list', '/api/v1/video/list', '/api/short/list', '/api/series/list', '/api/v1/series', '/api/home/recommend'],
+  DETAIL: ['/api/drama/detail', '/api/v1/drama/detail', '/api/video/detail', '/api/v1/video/detail', '/api/short/detail', '/api/series/detail'],
+  EPISODES: ['/api/drama/episodes', '/api/v1/drama/episodes', '/api/episode/list', '/api/v1/episode/list', '/api/video/episode'],
+  STREAM: ['/api/video/play', '/api/v1/video/play', '/api/episode/play', '/api/video/url', '/api/stream/url', '/api/v1/video/url'],
+  SEARCH: ['/api/search', '/api/v1/search', '/api/drama/search', '/api/video/search'],
+  CATEGORY: ['/api/category/list', '/api/v1/category', '/api/genre/list', '/api/tag/list'],
+}
+
+async function tryAPIs(type: keyof typeof API_PATHS, params?: Record<string, unknown>): Promise<{ endpoint: string; data: unknown } | null> {
+  for (const path of API_PATHS[type]) {
+    const url = `${BASE}${path}`
+
+    // GET
+    if (params) {
+      const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString()
+      const d = await api(`${url}?${qs}`)
+      if (d) return { endpoint: `GET ${path}?${qs}`, data: d }
+    } else {
+      const d = await api(url)
+      if (d) return { endpoint: `GET ${path}`, data: d }
+    }
+
+    // POST
+    const pd = await api(url, params || { page: 1, pageSize: 20 })
+    if (pd) return { endpoint: `POST ${path}`, data: pd }
+  }
+  return null
+}
+
+// ═══════════════════════════════════════════
+// PUBLIC: SCRAPE HOME
+// ═══════════════════════════════════════════
+
+export async function scrapeHome(): Promise<HomeData & { source: string }> {
+  const html = await get(HOME)
+  const $ = cheerio.load(html)
+  const ssr = extractSSR(html)
+
+  let allDramas: DramaCard[] = []
+  const sections: HomeData['sections'] = []
+  const banners: HomeData['banners'] = []
+  const categories: HomeData['categories'] = []
+  let source = 'html'
+
+  // ── 1. SSR DATA ──
+  if (ssr) {
+    source = ssr.type
+    const root = ssr.type === 'nextjs' ? ssr.data?.props?.pageProps : ssr.data
+
+    // Find drama arrays in SSR data
+    const arrays = findDramaArrays(root)
+    for (const arr of arrays) {
+      const mapped = arr.map(normalizeCard).filter(d => d.title)
+      if (mapped.length > 0) {
+        allDramas.push(...mapped)
       }
-    });
-  }
-
-  return episodes;
-}
-
-function parseDramaDetailFromHTML($: cheerio.CheerioAPI): Partial<DramaDetail> {
-  const detail: Partial<DramaDetail> = {};
-
-  // Title
-  detail.title =
-    $('h1').first().text().trim() ||
-    $('meta[property="og:title"]').attr('content') ||
-    $('title').text().trim();
-
-  // Cover image
-  detail.coverImage =
-    $('meta[property="og:image"]').attr('content') ||
-    $('[class*="cover"] img, [class*="poster"] img, [class*="banner"] img')
-      .first()
-      .attr('src') ||
-    '';
-
-  // Description
-  detail.description =
-    $('[class*="desc"], [class*="synopsis"], [class*="summary"], [class*="intro"]')
-      .first()
-      .text()
-      .trim() ||
-    $('meta[name="description"]').attr('content') ||
-    $('meta[property="og:description"]').attr('content') ||
-    '';
-
-  // Genre / Tags
-  const genreEls = $('[class*="genre"] a, [class*="tag"] a, [class*="category"] a');
-  detail.genre = [];
-  detail.tags = [];
-  genreEls.each((_, el) => {
-    const text = $(el).text().trim();
-    if (text) detail.tags!.push(text);
-  });
-
-  // Rating
-  const ratingText = $('[class*="rating"], [class*="score"]').first().text();
-  const ratingMatch = ratingText.match(/([\d.]+)/);
-  if (ratingMatch) detail.rating = parseFloat(ratingMatch[1]);
-
-  // Views
-  detail.views =
-    $('[class*="view"], [class*="play-count"]').first().text().trim() || '';
-
-  // Status
-  const statusText = $('[class*="status"]').first().text().toLowerCase();
-  if (statusText.includes('completed') || statusText.includes('tamat') || statusText.includes('selesai')) {
-    detail.status = 'completed';
-  } else if (statusText.includes('ongoing') || statusText.includes('berlangsung')) {
-    detail.status = 'ongoing';
-  } else {
-    detail.status = 'unknown';
-  }
-
-  // Episodes
-  detail.episodes = parseEpisodesFromHTML($);
-
-  return detail;
-}
-
-// ─── Stream URL Extraction ──────────────
-
-function extractStreamUrls(html: string): string[] {
-  const urls: string[] = [];
-
-  // m3u8
-  const m3u8 = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/g);
-  if (m3u8) urls.push(...m3u8);
-
-  // mp4
-  const mp4 = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g);
-  if (mp4) urls.push(...mp4);
-
-  // Generic video/play URLs in scripts
-  const videoUrls = html.match(
-    /(?:playUrl|videoUrl|streamUrl|video_url|play_url|src|source|url)\s*[=:]\s*["'](https?:\/\/[^"']+)["']/gi
-  );
-  if (videoUrls) {
-    for (const match of videoUrls) {
-      const urlMatch = match.match(/["'](https?:\/\/[^"']+)["']/);
-      if (urlMatch) urls.push(urlMatch[1]);
-    }
-  }
-
-  return [...new Set(urls)];
-}
-
-// ─── API Discovery ─────────────────────
-
-async function tryAPIEndpoints(
-  type: keyof typeof CONFIG.API_PATHS,
-  params?: Record<string, unknown>
-): Promise<{ endpoint: string; data: unknown } | null> {
-  const paths = CONFIG.API_PATHS[type];
-
-  for (const path of paths) {
-    const url = `${CONFIG.BASE_URL}${path}`;
-
-    // Try GET
-    const getData = await fetchJSON(
-      params
-        ? `${url}?${new URLSearchParams(
-            Object.entries(params).map(([k, v]) => [k, String(v)])
-          )}`
-        : url
-    );
-
-    if (getData) {
-      return { endpoint: `GET ${path}`, data: getData };
     }
 
-    // Try POST
-    const postData = await fetchJSON(url, params || { page: 1, pageSize: 20 });
-    if (postData) {
-      return { endpoint: `POST ${path}`, data: postData };
-    }
-  }
-
-  return null;
-}
-
-// ═════════════════════════════════════════
-// PUBLIC API
-// ═════════════════════════════════════════
-
-export async function scrapeHome(): Promise<{
-  sections: HomeSection[];
-  banners: Banner[];
-  categories: Category[];
-  allDramas: DramaCard[];
-  rawSource: string;
-}> {
-  const html = await fetchPage(CONFIG.HOME_URL);
-  const $ = cheerio.load(html);
-  const pageData = extractPageData(html);
-
-  let allDramas: DramaCard[] = [];
-  let sections: HomeSection[] = [];
-  let banners: Banner[] = [];
-  const categories: Category[] = [];
-
-  // Strategy 1: Parse from Next.js / Nuxt data
-  const ssrData = pageData.nextData || pageData.nuxtData;
-  if (ssrData) {
-    const dramaArrays = findDramaArrays(ssrData);
-    for (const arr of dramaArrays) {
-      const mapped = arr.map((item: Record<string, unknown>) => ({
-        id: String(item.id || item.drama_id || item.videoId || ''),
-        slug: String(item.slug || item.id || item.drama_id || ''),
-        title: String(item.title || item.name || item.drama_name || ''),
-        coverImage: String(item.cover || item.coverUrl || item.image || item.poster || item.cover_url || ''),
-        url: String(
-          item.url || item.detailUrl || item.shareUrl ||
-          `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`
-        ),
-        totalEpisodes: Number(item.totalEpisodes || item.episodeCount || item.episode_count || 0),
-        rating: Number(item.rating || item.score || 0),
-        genre: String(item.genre || item.category || item.categoryName || ''),
-      }));
-
-      allDramas.push(...mapped);
-    }
-
-    // Extract sections from pageProps
-    const props = pageData.nextData?.props?.pageProps || pageData.nuxtData;
-    if (props && typeof props === 'object') {
-      const propsRecord = props as Record<string, unknown>;
-      for (const [key, value] of Object.entries(propsRecord)) {
+    // Build sections from top-level keys
+    if (root && typeof root === 'object') {
+      for (const [key, value] of Object.entries(root as Record<string, unknown>)) {
         if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
-          const firstKeys = Object.keys(value[0] as Record<string, unknown>);
-          const isDrama = ['title', 'name', 'cover', 'id'].some((k) => firstKeys.includes(k));
-          if (isDrama) {
-            sections.push({
-              title: key.replace(/([A-Z])/g, ' $1').replace(/_/g, ' ').trim(),
-              type: 'list',
-              dramas: value.map((item: Record<string, unknown>) => ({
-                id: String(item.id || ''),
-                slug: String(item.slug || item.id || ''),
-                title: String(item.title || item.name || ''),
-                coverImage: String(item.cover || item.coverUrl || item.image || ''),
-                url: `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`,
-              })),
-            });
+          const firstKeys = value[0] ? Object.keys(value[0] as Record<string, unknown>) : []
+          if (['title', 'name', 'cover', 'id'].some(k => firstKeys.includes(k))) {
+            const mapped = value.map(normalizeCard).filter(d => d.title)
+            if (mapped.length > 0) {
+              sections.push({
+                title: key.replace(/([A-Z])/g, ' $1').replace(/_/g, ' ').trim(),
+                dramas: mapped,
+              })
+            }
           }
+        }
+
+        // Sections wrapped in { title, list } objects
+        if (Array.isArray(value)) {
+          for (const section of value) {
+            if (section && typeof section === 'object' && 'title' in section) {
+              const sec = section as Record<string, unknown>
+              const listKey = Object.keys(sec).find(k => Array.isArray(sec[k]) && (sec[k] as unknown[]).length > 0)
+              if (listKey) {
+                const mapped = (sec[listKey] as unknown[]).map(normalizeCard).filter(d => d.title)
+                if (mapped.length > 0) {
+                  sections.push({ title: String(sec.title || key), dramas: mapped })
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Next.js data routes
+    if (ssr.buildId) {
+      const nextPaths = [
+        `/_next/data/${ssr.buildId}/${LANG}.json`,
+        `/_next/data/${ssr.buildId}/index.json`,
+        `/_next/data/${ssr.buildId}/${LANG}/index.json`,
+      ]
+      for (const p of nextPaths) {
+        const d = await api(`${BASE}${p}`)
+        if (d) {
+          const arrs = findDramaArrays(d)
+          for (const arr of arrs) allDramas.push(...arr.map(normalizeCard).filter(x => x.title))
+          source = 'nextjs_data_route'
+          break
         }
       }
     }
   }
 
-  // Strategy 2: Parse from inline JSON data
-  if (pageData.inlineData) {
-    for (const data of pageData.inlineData) {
-      const arrays = findDramaArrays(data);
-      for (const arr of arrays) {
-        allDramas.push(
-          ...arr.map((item: Record<string, unknown>) => ({
-            id: String(item.id || ''),
-            slug: String(item.slug || item.id || ''),
-            title: String(item.title || item.name || ''),
-            coverImage: String(item.cover || item.image || ''),
-            url: `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`,
-          }))
-        );
-      }
+  // ── 2. API ENDPOINTS ──
+  if (allDramas.length === 0) {
+    const apiResult = await tryAPIs('HOME')
+    if (apiResult) {
+      source = apiResult.endpoint
+      const arrs = findDramaArrays(apiResult.data)
+      for (const arr of arrs) allDramas.push(...arr.map(normalizeCard).filter(x => x.title))
+    }
+
+    const listResult = await tryAPIs('LIST', { page: 1, pageSize: 30 })
+    if (listResult) {
+      if (!source.includes('api')) source = listResult.endpoint
+      const arrs = findDramaArrays(listResult.data)
+      for (const arr of arrs) allDramas.push(...arr.map(normalizeCard).filter(x => x.title))
     }
   }
 
-  // Strategy 3: Try API endpoints directly
-  const apiResult = await tryAPIEndpoints('HOME');
-  if (apiResult) {
-    const arrays = findDramaArrays(apiResult.data);
-    for (const arr of arrays) {
-      allDramas.push(
-        ...arr.map((item: Record<string, unknown>) => ({
-          id: String(item.id || ''),
-          slug: String(item.slug || item.id || ''),
-          title: String(item.title || item.name || ''),
-          coverImage: String(item.cover || item.image || ''),
-          url: `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`,
-        }))
-      );
-    }
-  }
-
-  // Strategy 4: Parse HTML directly
-  const htmlDramas = parseDramaCardsFromHTML($);
-  allDramas.push(...htmlDramas);
-
-  if (sections.length === 0) {
-    sections = parseSectionsFromHTML($);
-  }
+  // ── 3. HTML FALLBACK ──
+  const htmlCards = parseDramaCards($)
+  allDramas.push(...htmlCards)
 
   // Parse banners
-  $('[class*="banner"] a, [class*="swiper-slide"] a, [class*="carousel"] a').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') || '';
-    const $img = $el.find('img').first();
+  $('[class*="banner"] a, [class*="swiper"] a, [class*="carousel"] a, [class*="slider"] a').each((_, el) => {
+    const $a = $(el)
+    const $img = $a.find('img').first()
+    const href = $a.attr('href')
     if ($img.length && href) {
       banners.push({
-        id: String(banners.length),
         title: $img.attr('alt') || '',
-        image: $img.attr('src') || $img.attr('data-src') || '',
-        url: href.startsWith('http') ? href : `${CONFIG.BASE_URL}${href}`,
-      });
+        image: abs($img.attr('src') || $img.attr('data-src') || ''),
+        url: abs(href),
+      })
     }
-  });
+  })
 
   // Parse categories
-  $('a[href*="category"], a[href*="genre"], [class*="category"] a, [class*="genre"] a, [class*="tag"] a').each(
-    (_, el) => {
-      const $el = $(el);
-      const text = $el.text().trim();
-      const href = $el.attr('href') || '';
-      if (text && href) {
-        const slugMatch = href.match(/\/([^/]+)\/?$/);
-        categories.push({
-          id: slugMatch?.[1] || String(categories.length),
-          name: text,
-          slug: slugMatch?.[1] || text.toLowerCase().replace(/\s+/g, '-'),
-        });
-      }
+  $('a[href*="category"], a[href*="genre"], a[href*="type"], [class*="category"] a, [class*="genre"] a, [class*="filter"] a').each((_, el) => {
+    const text = $(el).text().trim()
+    const href = $(el).attr('href') || ''
+    if (text && text.length < 30 && href) {
+      categories.push({ name: text, slug: slug(href) || text.toLowerCase().replace(/\s+/g, '-') })
     }
-  );
+  })
 
-  // Deduplicate dramas
-  const seen = new Set<string>();
-  allDramas = allDramas.filter((d) => {
-    const key = d.title + d.url;
-    if (seen.has(key) || !d.title) return false;
-    seen.add(key);
-    return true;
-  });
+  // Build sections from HTML if empty
+  if (sections.length === 0) {
+    $('section, [class*="section"], [class*="module"], [class*="block"]').each((_, el) => {
+      const $s = $(el)
+      const title = $s.find('h2, h3, [class*="title"]').first().text().trim()
+      if (!title) return
 
-  return {
-    sections,
-    banners,
-    categories,
-    allDramas,
-    rawSource: ssrData ? 'ssr_data' : apiResult ? 'api' : 'html',
-  };
+      const dramas: DramaCard[] = []
+      $s.find('a[href]').each((_, a) => {
+        const href = $(a).attr('href') || ''
+        if (!/\/(drama|detail|series|video|play|short|watch)\//i.test(href)) return
+        const $img = $(a).find('img').first()
+        const t = ($img.attr('alt') || $(a).text().trim().split('\n')[0]?.trim() || '').trim()
+        if (!t) return
+        dramas.push({
+          id: slug(href), slug: slug(href), title: t,
+          cover: abs($img.attr('src') || ''), url: abs(href),
+        })
+      })
+      if (dramas.length > 0) sections.push({ title, dramas })
+    })
+  }
+
+  // Dedupe
+  const seen = new Set<string>()
+  allDramas = allDramas.filter(d => {
+    const k = d.title + '|' + d.url
+    if (seen.has(k) || !d.title) return false
+    seen.add(k)
+    return true
+  })
+
+  return { banners, sections, categories, allDramas, source }
 }
 
-export async function scrapeDramas(
-  page = 1,
-  category?: string
-): Promise<{ dramas: DramaCard[]; hasMore: boolean; source: string }> {
-  // Try API first
-  const params: Record<string, unknown> = { page, pageSize: 20, size: 20 };
-  if (category) params.category = category;
+// ═══════════════════════════════════════════
+// PUBLIC: SCRAPE DRAMAS (PAGINATED)
+// ═══════════════════════════════════════════
 
-  for (const type of ['DRAMA_LIST', 'HOME'] as const) {
-    const result = await tryAPIEndpoints(type, params);
-    if (result) {
-      const arrays = findDramaArrays(result.data);
-      if (arrays.length > 0) {
-        const dramas = arrays[0].map((item: Record<string, unknown>) => ({
-          id: String(item.id || ''),
-          slug: String(item.slug || item.id || ''),
-          title: String(item.title || item.name || ''),
-          coverImage: String(item.cover || item.coverUrl || item.image || ''),
-          url: `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`,
-          totalEpisodes: Number(item.totalEpisodes || item.episodeCount || 0),
-          rating: Number(item.rating || item.score || 0),
-          genre: String(item.genre || item.category || ''),
-        }));
+export async function scrapeDramas(page = 1, category?: string): Promise<{ dramas: DramaCard[]; hasMore: boolean; source: string }> {
+  // Try APIs with pagination
+  const params: Record<string, unknown> = { page, pageSize: 20, size: 20, limit: 20 }
+  if (category) { params.category = category; params.categoryId = category; params.genre = category; params.type = category }
 
-        return { dramas, hasMore: dramas.length >= 20, source: result.endpoint };
+  for (const type of ['LIST', 'HOME'] as const) {
+    const r = await tryAPIs(type, params)
+    if (r) {
+      const arrs = findDramaArrays(r.data)
+      if (arrs.length > 0) {
+        const dramas = arrs[0].map(normalizeCard).filter(d => d.title)
+        return { dramas, hasMore: dramas.length >= 15, source: r.endpoint }
       }
     }
   }
 
-  // Fallback to homepage
-  const homeData = await scrapeHome();
-  return {
-    dramas: homeData.allDramas,
-    hasMore: false,
-    source: 'homepage_html',
-  };
+  // Try HTML pagination
+  const urls = [
+    `${HOME}/drama?page=${page}`,
+    `${HOME}/dramas?page=${page}`,
+    `${HOME}/explore?page=${page}`,
+    `${HOME}/all?page=${page}`,
+    `${HOME}/browse?page=${page}`,
+    `${HOME}/library?page=${page}`,
+  ]
+
+  for (const url of urls) {
+    try {
+      const html = await get(url)
+      const $ = cheerio.load(html)
+      const ssr = extractSSR(html)
+
+      let dramas: DramaCard[] = []
+
+      if (ssr) {
+        const root = ssr.type === 'nextjs' ? ssr.data?.props?.pageProps : ssr.data
+        const arrs = findDramaArrays(root)
+        for (const arr of arrs) dramas.push(...arr.map(normalizeCard).filter(d => d.title))
+      }
+
+      if (dramas.length === 0) dramas = parseDramaCards($)
+
+      if (dramas.length > 0) {
+        return { dramas, hasMore: dramas.length >= 10, source: url }
+      }
+    } catch { continue }
+  }
+
+  // Fallback: homepage
+  const home = await scrapeHome()
+  return { dramas: home.allDramas, hasMore: false, source: 'homepage_fallback' }
 }
 
-export async function scrapeDramaDetail(slugOrUrl: string): Promise<DramaDetail | null> {
-  const url = slugOrUrl.startsWith('http')
-    ? slugOrUrl
-    : `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${slugOrUrl}`;
+// ═══════════════════════════════════════════
+// PUBLIC: SCRAPE DRAMA DETAIL
+// ═══════════════════════════════════════════
 
-  // Try API
-  for (const path of CONFIG.API_PATHS.DRAMA_DETAIL) {
-    const apiUrl = `${CONFIG.BASE_URL}${path}`;
-    const id = slugOrUrl.replace(/^.*\//, '');
+export async function scrapeDramaDetail(dramaSlug: string): Promise<DramaDetail | null> {
+  // Build possible URLs
+  const possibleUrls = [
+    `${HOME}/drama/${dramaSlug}`,
+    `${HOME}/detail/${dramaSlug}`,
+    `${HOME}/series/${dramaSlug}`,
+    `${HOME}/video/${dramaSlug}`,
+    `${HOME}/short/${dramaSlug}`,
+    `${HOME}/${dramaSlug}`,
+    `${BASE}/drama/${dramaSlug}`,
+    `${BASE}/detail/${dramaSlug}`,
+  ]
 
-    for (const params of [{ id }, { dramaId: id }, { slug: id }, { videoId: id }]) {
-      const data = await fetchJSON(apiUrl, params);
-      if (data) {
-        // Parse API response
-        const obj = data as Record<string, unknown>;
-        const detail = (obj.data || obj.result || obj) as Record<string, unknown>;
+  // If slug is a full URL
+  if (dramaSlug.startsWith('http')) possibleUrls.unshift(dramaSlug)
 
-        const drama: DramaDetail = {
-          id: String(detail.id || id),
-          slug: String(detail.slug || id),
-          title: String(detail.title || detail.name || ''),
-          originalTitle: String(detail.originalTitle || detail.original_title || ''),
-          url,
-          coverImage: String(detail.cover || detail.coverUrl || detail.image || detail.poster || ''),
-          description: String(detail.description || detail.desc || detail.synopsis || ''),
-          genre: Array.isArray(detail.genre) ? detail.genre.map(String) : [String(detail.genre || detail.category || '')],
-          tags: Array.isArray(detail.tags) ? detail.tags.map(String) : [],
-          totalEpisodes: Number(detail.totalEpisodes || detail.episodeCount || 0),
-          rating: Number(detail.rating || detail.score || 0),
-          views: String(detail.views || detail.playCount || ''),
-          status: String(detail.status || 'unknown') as DramaDetail['status'],
-          language: String(detail.language || detail.lang || ''),
-          year: String(detail.year || ''),
-          episodes: [],
-        };
+  // Try API first
+  for (const path of API_PATHS.DETAIL) {
+    for (const params of [
+      { id: dramaSlug }, { dramaId: dramaSlug }, { slug: dramaSlug },
+      { videoId: dramaSlug }, { sid: dramaSlug },
+    ]) {
+      const d = await api(`${BASE}${path}`, params)
+      if (d) {
+        const obj = (d as Record<string, unknown>)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const detail = (obj.data || obj.result || obj) as any
 
-        // Parse episodes from API response
-        const epArrays = deepFind<unknown[]>(detail, (key) =>
-          ['episodes', 'episodeList', 'episode_list', 'videoList', 'playlist'].includes(key)
-        );
+        if (detail && (detail.title || detail.name)) {
+          const drama: DramaDetail = {
+            ...normalizeCard(detail),
+            originalTitle: String(detail.originalTitle || detail.original_title || ''),
+            description: String(detail.description || detail.desc || detail.synopsis || detail.intro || ''),
+            genre: Array.isArray(detail.genre) ? detail.genre.map(String) : [String(detail.genre || detail.category || '')].filter(Boolean),
+            tags: Array.isArray(detail.tags) ? detail.tags.map(String) : [],
+            totalEpisodes: Number(detail.totalEpisodes || detail.episodeCount || detail.episode_count || 0),
+            language: String(detail.language || detail.lang || ''),
+            year: String(detail.year || ''),
+            cast: Array.isArray(detail.cast) ? detail.cast.map(String) : [],
+            episodes: [],
+          }
 
-        for (const epArr of epArrays) {
-          if (Array.isArray(epArr)) {
-            drama.episodes = epArr.map((ep: Record<string, unknown>, i: number) => ({
-              number: Number(ep.number || ep.episode || ep.sort || ep.ep || i + 1),
-              title: String(ep.title || ep.name || `Episode ${i + 1}`),
-              url: String(ep.url || ep.detailUrl || ep.playUrl || ''),
-              streamUrl: String(ep.streamUrl || ep.videoUrl || ep.playUrl || ep.video_url || ''),
-              thumbnail: String(ep.thumbnail || ep.cover || ep.image || ''),
-              duration: String(ep.duration || ''),
-              isFree: Boolean(ep.isFree ?? ep.free ?? true),
-              isVip: Boolean(ep.isVip || ep.vip || ep.locked || false),
-            }));
-            break;
+          // Episodes from same response
+          const epArrs = findEpisodeArrays(detail)
+          if (epArrs.length > 0) {
+            drama.episodes = epArrs[0].map(normalizeEpisode)
+          }
+
+          // Or fetch episodes separately
+          if (drama.episodes.length === 0) {
+            const epsData = await fetchEpisodes(dramaSlug)
+            if (epsData.length > 0) drama.episodes = epsData
+          }
+
+          drama.totalEpisodes = drama.totalEpisodes || drama.episodes.length
+          return drama
+        }
+      }
+
+      // Also try GET with query
+      const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString()
+      const gd = await api(`${BASE}${path}?${qs}`)
+      if (gd) {
+        // Same parsing as above
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const detail = ((gd as any).data || (gd as any).result || gd) as any
+        if (detail?.title || detail?.name) {
+          const drama: DramaDetail = {
+            ...normalizeCard(detail),
+            originalTitle: '', description: String(detail.description || detail.desc || ''),
+            genre: [].concat(detail.genre || detail.category || []).map(String).filter(Boolean),
+            tags: [], totalEpisodes: 0, language: '', year: '', cast: [],
+            episodes: findEpisodeArrays(detail).flatMap(a => a.map(normalizeEpisode)),
+          }
+          if (drama.episodes.length === 0) drama.episodes = await fetchEpisodes(dramaSlug)
+          drama.totalEpisodes = drama.episodes.length
+          return drama
+        }
+      }
+    }
+  }
+
+  // Try HTML scraping
+  for (const url of possibleUrls) {
+    try {
+      const html = await get(url)
+      const $ = cheerio.load(html)
+      const ssr = extractSSR(html)
+
+      const drama: DramaDetail = {
+        id: dramaSlug, slug: dramaSlug, title: '', originalTitle: '', cover: '',
+        url, description: '', genre: [], tags: [], totalEpisodes: 0, rating: 0,
+        views: '', status: '', language: '', year: '', cast: [], episodes: [],
+      }
+
+      // SSR data
+      if (ssr) {
+        const root = ssr.type === 'nextjs' ? ssr.data?.props?.pageProps : ssr.data
+
+        // Find the drama detail object
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const detailCandidates = deepSearch(root, (k) => {
+          return ['dramaDetail', 'drama', 'detail', 'videoDetail', 'seriesDetail', 'data', 'info'].includes(k)
+        })
+
+        for (const candidate of detailCandidates) {
+          if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const c = candidate as any
+            if (c.title || c.name) {
+              Object.assign(drama, normalizeCard(c))
+              drama.description = String(c.description || c.desc || c.synopsis || '')
+              drama.originalTitle = String(c.originalTitle || c.original_title || '')
+              drama.genre = [].concat(c.genre || c.category || []).map(String).filter(Boolean)
+              drama.tags = [].concat(c.tags || []).map(String).filter(Boolean)
+              drama.language = String(c.language || '')
+              drama.year = String(c.year || '')
+              drama.cast = [].concat(c.cast || c.actors || []).map(String).filter(Boolean)
+              break
+            }
           }
         }
-
-        if (drama.title) return drama;
-      }
-    }
-  }
-
-  // Fallback: Scrape HTML
-  const html = await fetchPage(url);
-  const $ = cheerio.load(html);
-  const pageData = extractPageData(html);
-
-  // From SSR data
-  if (pageData.nextData || pageData.nuxtData) {
-    const ssrData = pageData.nextData?.props?.pageProps || pageData.nuxtData;
-    if (ssrData && typeof ssrData === 'object') {
-      const record = ssrData as Record<string, unknown>;
-      const dramaInfo = (record.dramaDetail || record.drama || record.detail ||
-        record.videoDetail || record.data || record.seriesDetail || record) as Record<string, unknown>;
-
-      if (dramaInfo && (dramaInfo.title || dramaInfo.name)) {
-        const drama: DramaDetail = {
-          id: String(dramaInfo.id || ''),
-          slug: slugOrUrl.replace(/^.*\//, ''),
-          title: String(dramaInfo.title || dramaInfo.name || ''),
-          originalTitle: String(dramaInfo.originalTitle || ''),
-          url,
-          coverImage: String(dramaInfo.cover || dramaInfo.coverUrl || dramaInfo.image || ''),
-          description: String(dramaInfo.description || dramaInfo.desc || ''),
-          genre: [],
-          tags: [],
-          totalEpisodes: Number(dramaInfo.totalEpisodes || dramaInfo.episodeCount || 0),
-          rating: Number(dramaInfo.rating || dramaInfo.score || 0),
-          views: String(dramaInfo.views || dramaInfo.playCount || ''),
-          status: 'unknown',
-          language: String(dramaInfo.language || ''),
-          year: String(dramaInfo.year || ''),
-          episodes: [],
-        };
 
         // Episodes from SSR
-        const epArrays = findDramaArrays(dramaInfo);
-        // Also find direct episode arrays
-        const directEps = deepFind<unknown[]>(dramaInfo, (key) =>
-          ['episodes', 'episodeList', 'videoList', 'playlist'].includes(key)
-        );
-
-        for (const arr of directEps) {
-          if (Array.isArray(arr)) {
-            drama.episodes = arr.map((ep: Record<string, unknown>, i: number) => ({
-              number: Number(ep.number || ep.episode || ep.sort || i + 1),
-              title: String(ep.title || ep.name || `Episode ${i + 1}`),
-              url: String(ep.url || ep.detailUrl || ''),
-              streamUrl: String(ep.streamUrl || ep.videoUrl || ep.playUrl || ''),
-              thumbnail: String(ep.thumbnail || ep.cover || ''),
-              duration: String(ep.duration || ''),
-              isFree: Boolean(ep.isFree ?? true),
-              isVip: Boolean(ep.isVip || ep.vip || false),
-            }));
-            break;
-          }
+        const epArrs = findEpisodeArrays(root)
+        if (epArrs.length > 0) {
+          drama.episodes = epArrs[0].map(normalizeEpisode)
         }
-
-        return drama;
       }
-    }
+
+      // HTML fallback
+      if (!drama.title) {
+        const htmlDetail = parseDetailHTML($)
+        drama.title = htmlDetail.title || ''
+        drama.cover = htmlDetail.cover || drama.cover
+        drama.description = htmlDetail.description || drama.description
+        drama.genre = htmlDetail.genre || drama.genre
+        drama.rating = htmlDetail.rating || drama.rating
+        drama.views = htmlDetail.views || drama.views
+      }
+
+      if (drama.episodes.length === 0) {
+        drama.episodes = parseEpisodesHTML($)
+      }
+
+      // Stream URLs from page HTML
+      if (drama.episodes.length === 0) {
+        const streams = extractStreamFromHTML(html)
+        if (streams.length > 0) {
+          drama.episodes = [{ number: 1, title: 'Episode 1', url, streamUrl: streams[0], thumbnail: '', duration: '', isFree: true, isVip: false }]
+        }
+      }
+
+      // Try fetch episodes via API
+      if (drama.episodes.length === 0) {
+        drama.episodes = await fetchEpisodes(dramaSlug)
+      }
+
+      drama.totalEpisodes = drama.totalEpisodes || drama.episodes.length
+      drama.url = url
+
+      if (drama.title) return drama
+    } catch { continue }
   }
 
-  // Pure HTML parsing
-  const htmlDetail = parseDramaDetailFromHTML($);
-
-  const slugPart = slugOrUrl.replace(/^.*\//, '');
-  return {
-    id: slugPart,
-    slug: slugPart,
-    title: htmlDetail.title || '',
-    url,
-    coverImage: htmlDetail.coverImage || '',
-    description: htmlDetail.description || '',
-    genre: htmlDetail.genre || [],
-    tags: htmlDetail.tags || [],
-    totalEpisodes: htmlDetail.episodes?.length || 0,
-    rating: htmlDetail.rating || 0,
-    views: htmlDetail.views || '',
-    status: htmlDetail.status || 'unknown',
-    language: htmlDetail.language || '',
-    year: htmlDetail.year || '',
-    episodes: htmlDetail.episodes || [],
-  };
+  return null
 }
 
-export async function scrapeStreamUrl(episodeUrl: string): Promise<string[]> {
-  const html = await fetchPage(episodeUrl);
-  const urls = extractStreamUrls(html);
+// ═══════════════════════════════════════════
+// FETCH EPISODES SEPARATELY
+// ═══════════════════════════════════════════
 
-  // Also check SSR data
-  const pageData = extractPageData(html);
-  const ssrData = pageData.nextData || pageData.nuxtData;
-
-  if (ssrData) {
-    const streamUrls = deepFind<string>(ssrData, (key, value) => {
-      if (typeof value !== 'string') return false;
-      return (
-        ['playUrl', 'videoUrl', 'streamUrl', 'video_url', 'play_url', 'url', 'src'].includes(key) &&
-        (value.includes('.m3u8') || value.includes('.mp4') || value.includes('video') || value.includes('stream'))
-      );
-    });
-    urls.push(...streamUrls);
-  }
-
-  // Try API
-  const $ = cheerio.load(html);
-  const videoId = episodeUrl.match(/\/([^/]+)\/?$/)?.[1] || '';
-
-  for (const path of CONFIG.API_PATHS.STREAM) {
-    const apiUrl = `${CONFIG.BASE_URL}${path}`;
+async function fetchEpisodes(dramaId: string): Promise<Episode[]> {
+  for (const path of API_PATHS.EPISODES) {
     for (const params of [
-      { id: videoId },
-      { episodeId: videoId },
-      { videoId },
-      { vid: videoId },
+      { id: dramaId }, { dramaId }, { videoId: dramaId }, { sid: dramaId }, { slug: dramaId },
     ]) {
-      const data = await fetchJSON(apiUrl, params);
-      if (data) {
-        const streamUrls = deepFind<string>(data, (key, value) => {
-          return (
-            typeof value === 'string' &&
-            (value.includes('.m3u8') || value.includes('.mp4'))
-          );
-        });
-        urls.push(...streamUrls);
+      const d = await api(`${BASE}${path}`, params)
+      if (d) {
+        const arrs = findEpisodeArrays(d) || findDramaArrays(d)
+        if (arrs.length > 0) return arrs[0].map(normalizeEpisode)
+
+        // Maybe the data itself is an array
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const obj = d as any
+        const list = obj.data || obj.result || obj.list || obj.episodes || obj
+        if (Array.isArray(list) && list.length > 0) {
+          return list.map(normalizeEpisode)
+        }
+      }
+
+      // GET
+      const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString()
+      const gd = await api(`${BASE}${path}?${qs}`)
+      if (gd) {
+        const arrs = findEpisodeArrays(gd)
+        if (arrs.length > 0) return arrs[0].map(normalizeEpisode)
+      }
+    }
+  }
+  return []
+}
+
+// ═══════════════════════════════════════════
+// PUBLIC: STREAM URL
+// ═══════════════════════════════════════════
+
+export async function scrapeStream(dramaSlug: string, ep: number): Promise<StreamInfo> {
+  const result: StreamInfo = { episodeUrl: '', streams: [] }
+
+  // 1. Get drama detail to find episode URL
+  const drama = await scrapeDramaDetail(dramaSlug)
+  if (!drama) return result
+
+  const episode = drama.episodes.find(e => e.number === ep) || drama.episodes[ep - 1]
+  if (!episode) return result
+
+  result.episodeUrl = episode.url
+
+  // If stream URL already in episode data
+  if (episode.streamUrl) {
+    result.streams.push({
+      url: episode.streamUrl,
+      type: episode.streamUrl.includes('.m3u8') ? 'hls' : 'mp4',
+      quality: 'auto',
+    })
+  }
+
+  // 2. Try stream API
+  for (const path of API_PATHS.STREAM) {
+    for (const params of [
+      { id: episode.number, dramaId: dramaSlug },
+      { episodeId: `${dramaSlug}_${ep}` },
+      { videoId: dramaSlug, episode: ep },
+      { id: dramaSlug, ep },
+    ]) {
+      const d = await api(`${BASE}${path}`, params)
+      if (d) {
+        const urls = findStreamUrls(d)
+        for (const u of urls) {
+          result.streams.push({
+            url: u,
+            type: u.includes('.m3u8') ? 'hls' : 'mp4',
+            quality: u.includes('1080') ? '1080p' : u.includes('720') ? '720p' : 'auto',
+          })
+        }
       }
     }
   }
 
-  return [...new Set(urls)];
+  // 3. Scrape episode page
+  if (episode.url && result.streams.length === 0) {
+    try {
+      const html = await get(episode.url)
+      const ssr = extractSSR(html)
+
+      if (ssr) {
+        const root = ssr.type === 'nextjs' ? ssr.data?.props?.pageProps : ssr.data
+        const urls = findStreamUrls(root)
+        for (const u of urls) {
+          result.streams.push({ url: u, type: u.includes('.m3u8') ? 'hls' : 'mp4', quality: 'auto' })
+        }
+      }
+
+      const htmlUrls = extractStreamFromHTML(html)
+      for (const u of htmlUrls) {
+        result.streams.push({ url: u, type: u.includes('.m3u8') ? 'hls' : 'mp4', quality: 'auto' })
+      }
+    } catch { /* skip */ }
+  }
+
+  // Dedupe streams
+  const seen = new Set<string>()
+  result.streams = result.streams.filter(s => {
+    if (seen.has(s.url)) return false
+    seen.add(s.url)
+    return true
+  })
+
+  // Sort: HLS first
+  result.streams.sort((a, b) => a.type === 'hls' ? -1 : b.type === 'hls' ? 1 : 0)
+
+  return result
 }
 
-export async function scrapeSearch(query: string, page = 1): Promise<SearchResult> {
-  // Try search API
-  for (const path of CONFIG.API_PATHS.SEARCH) {
-    const url = `${CONFIG.BASE_URL}${path}`;
+// ═══════════════════════════════════════════
+// PUBLIC: SEARCH
+// ═══════════════════════════════════════════
 
+export async function scrapeSearch(query: string, page = 1): Promise<{ dramas: DramaCard[]; total: number; source: string }> {
+  // Try search API
+  for (const path of API_PATHS.SEARCH) {
     for (const params of [
       { keyword: query, page, pageSize: 20 },
       { q: query, page, size: 20 },
       { search: query, page },
       { query, page },
+      { key: query, page },
+      { wd: query, page },
     ]) {
-      const data = await fetchJSON(url, params);
-      if (data) {
-        const arrays = findDramaArrays(data);
-        if (arrays.length > 0) {
-          return {
-            query,
-            total: arrays[0].length,
-            page,
-            dramas: arrays[0].map((item: Record<string, unknown>) => ({
-              id: String(item.id || ''),
-              slug: String(item.slug || item.id || ''),
-              title: String(item.title || item.name || ''),
-              coverImage: String(item.cover || item.image || ''),
-              url: `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`,
-            })),
-          };
+      // POST
+      const pd = await api(`${BASE}${path}`, params)
+      if (pd) {
+        const arrs = findDramaArrays(pd)
+        if (arrs.length > 0) {
+          const dramas = arrs[0].map(normalizeCard).filter(d => d.title)
+          return { dramas, total: dramas.length, source: `POST ${path}` }
         }
       }
-
-      // Try GET too
-      const getUrl = `${url}?${new URLSearchParams(
-        Object.entries(params).map(([k, v]) => [k, String(v)])
-      )}`;
-      const getData = await fetchJSON(getUrl);
-      if (getData) {
-        const arrays = findDramaArrays(getData);
-        if (arrays.length > 0) {
-          return {
-            query,
-            total: arrays[0].length,
-            page,
-            dramas: arrays[0].map((item: Record<string, unknown>) => ({
-              id: String(item.id || ''),
-              slug: String(item.slug || item.id || ''),
-              title: String(item.title || item.name || ''),
-              coverImage: String(item.cover || item.image || ''),
-              url: `${CONFIG.BASE_URL}/${CONFIG.LANG}/drama/${item.id || item.slug || ''}`,
-            })),
-          };
-        }
-      }
-    }
-  }
-
-  // Fallback: scrape search page HTML
-  const searchUrls = [
-    `${CONFIG.BASE_URL}/${CONFIG.LANG}/search?q=${encodeURIComponent(query)}`,
-    `${CONFIG.BASE_URL}/search?keyword=${encodeURIComponent(query)}`,
-    `${CONFIG.BASE_URL}/${CONFIG.LANG}/search/${encodeURIComponent(query)}`,
-  ];
-
-  for (const searchUrl of searchUrls) {
-    try {
-      const html = await fetchPage(searchUrl);
-      const $ = cheerio.load(html);
-      const dramas = parseDramaCardsFromHTML($);
-
-      if (dramas.length > 0) {
-        return { query, total: dramas.length, page, dramas };
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return { query, total: 0, page, dramas: [] };
-}
-
-// Debug: discover all endpoints
-export async function discoverEndpoints(): Promise<Record<string, unknown>> {
-  const results: Record<string, unknown> = {};
-
-  for (const [type, paths] of Object.entries(CONFIG.API_PATHS)) {
-    results[type] = {};
-    for (const path of paths) {
-      const url = `${CONFIG.BASE_URL}${path}`;
 
       // GET
-      const getRes = await fetchJSON(url);
-      if (getRes) {
-        (results[type] as Record<string, unknown>)[`GET ${path}`] = {
-          success: true,
-          sample: JSON.stringify(getRes).slice(0, 300),
-        };
+      const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString()
+      const gd = await api(`${BASE}${path}?${qs}`)
+      if (gd) {
+        const arrs = findDramaArrays(gd)
+        if (arrs.length > 0) {
+          const dramas = arrs[0].map(normalizeCard).filter(d => d.title)
+          return { dramas, total: dramas.length, source: `GET ${path}?${qs}` }
+        }
+      }
+    }
+  }
+
+  // HTML search pages
+  const searchUrls = [
+    `${HOME}/search?q=${encodeURIComponent(query)}`,
+    `${HOME}/search?keyword=${encodeURIComponent(query)}`,
+    `${HOME}/search/${encodeURIComponent(query)}`,
+    `${BASE}/search?q=${encodeURIComponent(query)}`,
+    `${BASE}/search?keyword=${encodeURIComponent(query)}`,
+  ]
+
+  for (const url of searchUrls) {
+    try {
+      const html = await get(url)
+      const $ = cheerio.load(html)
+      const ssr = extractSSR(html)
+
+      let dramas: DramaCard[] = []
+
+      if (ssr) {
+        const root = ssr.type === 'nextjs' ? ssr.data?.props?.pageProps : ssr.data
+        const arrs = findDramaArrays(root)
+        for (const arr of arrs) dramas.push(...arr.map(normalizeCard).filter(d => d.title))
+      }
+
+      if (dramas.length === 0) dramas = parseDramaCards($)
+
+      if (dramas.length > 0) {
+        return { dramas, total: dramas.length, source: url }
+      }
+    } catch { continue }
+  }
+
+  return { dramas: [], total: 0, source: 'none' }
+}
+
+// ═══════════════════════════════════════════
+// PUBLIC: DISCOVER (DEBUG)
+// ═══════════════════════════════════════════
+
+export async function discover(): Promise<Record<string, unknown>> {
+  const results: Record<string, unknown> = {}
+
+  // Test all API endpoints
+  for (const [type, paths] of Object.entries(API_PATHS)) {
+    const typeResults: Record<string, unknown> = {}
+
+    for (const path of paths) {
+      const url = `${BASE}${path}`
+
+      // GET
+      const gd = await api(url)
+      if (gd) {
+        typeResults[`✅ GET ${path}`] = JSON.stringify(gd).slice(0, 200)
       }
 
       // POST
-      const postRes = await fetchJSON(url, { page: 1, pageSize: 20 });
-      if (postRes) {
-        (results[type] as Record<string, unknown>)[`POST ${path}`] = {
-          success: true,
-          sample: JSON.stringify(postRes).slice(0, 300),
-        };
+      const pd = await api(url, { page: 1, pageSize: 10 })
+      if (pd) {
+        typeResults[`✅ POST ${path}`] = JSON.stringify(pd).slice(0, 200)
       }
     }
+
+    results[type] = Object.keys(typeResults).length > 0 ? typeResults : '❌ no working endpoints'
   }
 
-  return results;
+  // Homepage SSR analysis
+  try {
+    const html = await get(HOME)
+    const ssr = extractSSR(html)
+    results['SSR_ANALYSIS'] = {
+      type: ssr?.type || 'none',
+      buildId: ssr?.buildId || null,
+      hasData: ssr ? Object.keys(ssr.data || {}).length > 0 : false,
+      topKeys: ssr?.type === 'nextjs'
+        ? Object.keys(ssr.data?.props?.pageProps || {}).slice(0, 20)
+        : ssr ? Object.keys(ssr.data || {}).slice(0, 20) : [],
+      dramaArraysFound: ssr ? findDramaArrays(ssr.type === 'nextjs' ? ssr.data?.props?.pageProps : ssr.data).length : 0,
+    }
+  } catch (e) {
+    results['SSR_ANALYSIS'] = { error: String(e) }
+  }
+
+  // Homepage link analysis
+  try {
+    const html = await get(HOME)
+    const $ = cheerio.load(html)
+    const allLinks: string[] = []
+    $('a[href]').each((_, el) => {
+      const href = $(el).attr('href') || ''
+      if (href && !href.startsWith('#') && !href.startsWith('javascript')) {
+        allLinks.push(href)
+      }
+    })
+
+    const dramaLinks = allLinks.filter(h => /\/(drama|detail|series|video|play|short|watch)\//i.test(h))
+    const uniqueDramaLinks = [...new Set(dramaLinks)]
+
+    results['HTML_ANALYSIS'] = {
+      totalLinks: allLinks.length,
+      dramaLinks: uniqueDramaLinks.length,
+      sampleDramaLinks: uniqueDramaLinks.slice(0, 10),
+      urlPatterns: [...new Set(uniqueDramaLinks.map(u => u.replace(/\/[^/]+$/, '/[slug]')))].slice(0, 5),
+    }
+  } catch { /* skip */ }
+
+  return results
 }
