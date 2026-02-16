@@ -1,74 +1,26 @@
-// ================================
-// CACHING LAYER
-// ================================
+interface Entry<T> { data: T; exp: number }
 
-import { CONFIG } from './constants';
+const store = new Map<string, Entry<unknown>>()
 
-interface CacheEntry<T> {
-  data: T;
-  expires: number;
+export function cget<T>(key: string): T | null {
+  const e = store.get(key) as Entry<T> | undefined
+  if (!e) return null
+  if (Date.now() > e.exp) { store.delete(key); return null }
+  return e.data
 }
 
-class MemoryCache {
-  private store = new Map<string, CacheEntry<unknown>>();
-  private maxSize = 500;
-
-  get<T>(key: string): T | null {
-    const entry = this.store.get(key) as CacheEntry<T> | undefined;
-    if (!entry) return null;
-
-    if (Date.now() > entry.expires) {
-      this.store.delete(key);
-      return null;
-    }
-
-    return entry.data;
+export function cset<T>(key: string, data: T, ttl = 300): void {
+  if (store.size > 400) {
+    const first = store.keys().next().value
+    if (first) store.delete(first)
   }
-
-  set<T>(key: string, data: T, ttl?: number): void {
-    // Evict oldest if full
-    if (this.store.size >= this.maxSize) {
-      const firstKey = this.store.keys().next().value;
-      if (firstKey) this.store.delete(firstKey);
-    }
-
-    this.store.set(key, {
-      data,
-      expires: Date.now() + (ttl || CONFIG.CACHE_TTL) * 1000,
-    });
-  }
-
-  has(key: string): boolean {
-    return this.get(key) !== null;
-  }
-
-  clear(): void {
-    this.store.clear();
-  }
-
-  stats() {
-    return {
-      size: this.store.size,
-      maxSize: this.maxSize,
-    };
-  }
+  store.set(key, { data, exp: Date.now() + ttl * 1000 })
 }
 
-// Singleton
-export const cache = new MemoryCache();
-
-// Helper: cache wrapper for async functions
-export async function withCache<T>(
-  key: string,
-  fn: () => Promise<T>,
-  ttl?: number
-): Promise<{ data: T; cached: boolean }> {
-  const cached = cache.get<T>(key);
-  if (cached) {
-    return { data: cached, cached: true };
-  }
-
-  const data = await fn();
-  cache.set(key, data, ttl);
-  return { data, cached: false };
+export async function cached<T>(key: string, fn: () => Promise<T>, ttl = 300): Promise<{ data: T; hit: boolean }> {
+  const c = cget<T>(key)
+  if (c) return { data: c, hit: true }
+  const d = await fn()
+  cset(key, d, ttl)
+  return { data: d, hit: false }
 }
