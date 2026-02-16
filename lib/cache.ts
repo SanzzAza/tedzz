@@ -1,22 +1,45 @@
-interface E<T> { d: T; exp: number }
-const s = new Map<string, E<unknown>>()
-
-export function cget<T>(k: string): T | null {
-  const e = s.get(k) as E<T> | undefined
-  if (!e) return null
-  if (Date.now() > e.exp) { s.delete(k); return null }
-  return e.d
+interface CacheEntry {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any
+  expires: number
 }
 
-export function cset<T>(k: string, d: T, ttl = 300) {
-  if (s.size > 400) { const f = s.keys().next().value; if (f) s.delete(f) }
-  s.set(k, { d, exp: Date.now() + ttl * 1000 })
+const store = new Map<string, CacheEntry>()
+const MAX_SIZE = 400
+
+export function cget<T>(key: string): T | null {
+  const entry = store.get(key)
+  if (!entry) return null
+  if (Date.now() > entry.expires) {
+    store.delete(key)
+    return null
+  }
+  return entry.data as T
 }
 
-export async function cached<T>(k: string, fn: () => Promise<T>, ttl = 300): Promise<{ data: T; hit: boolean }> {
-  const c = cget<T>(k)
-  if (c) return { data: c, hit: true }
-  const d = await fn()
-  cset(k, d, ttl)
-  return { data: d, hit: false }
+export function cset(key: string, data: unknown, ttl: number = 300): void {
+  if (store.size >= MAX_SIZE) {
+    const firstKey = store.keys().next()
+    if (!firstKey.done && firstKey.value) {
+      store.delete(firstKey.value)
+    }
+  }
+  store.set(key, {
+    data,
+    expires: Date.now() + ttl * 1000,
+  })
+}
+
+export async function cached<T>(
+  key: string,
+  fn: () => Promise<T>,
+  ttl: number = 300
+): Promise<{ data: T; hit: boolean }> {
+  const existing = cget<T>(key)
+  if (existing !== null) {
+    return { data: existing, hit: true }
+  }
+  const fresh = await fn()
+  cset(key, fresh, ttl)
+  return { data: fresh, hit: false }
 }
